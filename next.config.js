@@ -2,5 +2,4 @@
 const nextConfig = {
   reactStrictMode: true
 };
-export default nextConfig;
-Fix next.config.mjs
+module.exports = nextConfig;
