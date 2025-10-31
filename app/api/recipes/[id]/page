@@ -1,69 +1,98 @@
-import { notFound } from 'next/navigation';
+'use client';
 
-async function getRecipe(id) {
-  // na Vercelu stačí relativní cesta
-  const r = await fetch(`/api/recipes/${id}`, { cache: 'no-store' });
-  const data = await r.json();
-  if (!r.ok) throw new Error(data.error || 'Failed to load');
-  return data;
-}
+import { useEffect, useState } from 'react';
+import { useParams, useRouter } from 'next/navigation';
 
-export default async function RecipePage({ params }) {
-  const { id } = params || {};
-  let recipe;
-  try {
-    recipe = await getRecipe(id);
-  } catch {
-    notFound();
+export default function RecipeDetailPage() {
+  const { id } = useParams();           // id z URL
+  const router = useRouter();
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState('');
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let alive = true;
+    async function load() {
+      try {
+        const res = await fetch(`/api/recipes/${id}`, { cache: 'no-store' });
+        // bezpečné čtení odpovědi (když to není JSON, přečteme text)
+        let json;
+        try { json = await res.json(); } catch { 
+          const txt = await res.text();
+          throw new Error(`HTTP ${res.status} ${txt || ''}`.trim());
+        }
+        if (!res.ok || json?.error) {
+          throw new Error(json?.error || `HTTP ${res.status}`);
+        }
+        if (alive) setData(json);
+      } catch (e) {
+        if (alive) setErr(e.message || 'Nepodařilo se načíst recept.');
+      } finally {
+        if (alive) setLoading(false);
+      }
+    }
+    load();
+    return () => { alive = false; };
+  }, [id]);
+
+  if (loading) {
+    return <main style={{maxWidth:900, margin:'40px auto', padding:16}}>Načítám…</main>;
   }
-  if (!recipe || !recipe.title) notFound();
 
+  if (err) {
+    return (
+      <main style={{maxWidth:900, margin:'40px auto', padding:16}}>
+        <a href="/" style={{textDecoration:'none', color:'#555'}}>&larr; Zpět</a>
+        <h1>Chyba načtení</h1>
+        <p style={{color:'#b00'}}>{err}</p>
+        <button onClick={()=>router.refresh()}>Zkusit znovu</button>
+      </main>
+    );
+  }
+
+  const r = data || {};
   return (
     <main style={{maxWidth:900, margin:'40px auto', padding:16, fontFamily:'system-ui'}}>
       <a href="/" style={{textDecoration:'none', color:'#555'}}>&larr; Zpět</a>
-      <h1 style={{margin:'12px 0 8px'}}>{recipe.title}</h1>
+      <h1 style={{margin:'12px 0 8px'}}>{r.title}</h1>
 
-      {recipe.tags?.length ? (
+      {r.tags?.length ? (
         <div style={{display:'flex', gap:8, flexWrap:'wrap', marginBottom:12}}>
-          {recipe.tags.map(t => <span key={t} style={{background:'#f1f1f1', borderRadius:999, padding:'4px 8px', fontSize:12}}>#{t}</span>)}
+          {r.tags.map(t => <span key={t} style={{background:'#f1f1f1', borderRadius:999, padding:'4px 8px', fontSize:12}}>#{t}</span>)}
         </div>
       ) : null}
 
-      {recipe.image ? (
+      {r.image ? (
         <div style={{aspectRatio:'16/9', background:'#f2f2f2', borderRadius:12, overflow:'hidden', margin:'12px 0'}}>
-          <img src={recipe.image} alt={recipe.title} style={{width:'100%', height:'100%', objectFit:'cover'}} />
+          <img src={r.image} alt={r.title} style={{width:'100%', height:'100%', objectFit:'cover'}} />
         </div>
       ) : null}
 
-      {recipe.description && <p style={{color:'#444', lineHeight:1.6}}>{recipe.description}</p>}
+      {r.description && <p style={{color:'#444', lineHeight:1.6}}>{r.description}</p>}
 
       <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:24, marginTop:24}}>
         <section>
           <h2>Ingredience</h2>
-          {recipe.ingredients?.length ? (
-            <ul>
-              {recipe.ingredients.map((it, i) => <li key={i}>{it}</li>)}
-            </ul>
+          {r.ingredients?.length ? (
+            <ul>{r.ingredients.map((it,i)=><li key={i}>{it}</li>)}</ul>
           ) : <p style={{color:'#777'}}>Suroviny se nepodařilo automaticky načíst.</p>}
         </section>
         <section>
           <h2>Postup</h2>
-          {recipe.steps?.length ? (
-            <ol>
-              {recipe.steps.map((it, i) => <li key={i} style={{marginBottom:6}}>{it}</li>)}
-            </ol>
+          {r.steps?.length ? (
+            <ol>{r.steps.map((it,i)=><li key={i} style={{marginBottom:6}}>{it}</li>)}</ol>
           ) : <p style={{color:'#777'}}>Postup se nepodařilo automaticky načíst.</p>}
         </section>
       </div>
 
       <div style={{marginTop:24, fontSize:14, color:'#666'}}>
-        {recipe.time && <span><b>Čas:</b> {recipe.time}</span>} &nbsp;
-        {recipe.servings && <span><b>Porce:</b> {recipe.servings}</span>}
+        {r.time && <span><b>Čas:</b> {r.time}</span>} &nbsp;
+        {r.servings && <span><b>Porce:</b> {r.servings}</span>}
       </div>
 
-      {recipe.source && (
+      {r.source && (
         <p style={{marginTop:18}}>
-          Zdroj: <a href={recipe.source} target="_blank" rel="noreferrer">{recipe.source}</a>
+          Zdroj: <a href={r.source} target="_blank" rel="noreferrer">{r.source}</a>
         </p>
       )}
     </main>
