@@ -14,11 +14,9 @@ export async function GET(_req, { params }) {
     const { id } = params || {};
     if (!id) return new Response(JSON.stringify({ error: 'Missing id' }), { status: 400 });
 
-    // 1) rychlá cesta: per-id klíč
     const direct = await kv.get(`recipe:${id}`);
     if (direct) return new Response(JSON.stringify(safeParse(direct) || direct), { headers: { 'content-type': 'application/json' } });
 
-    // 2) fallback: projdi list "recipes" a najdi shodné id
     const list = await kv.lrange('recipes', 0, -1);
     const found = (list || []).map(safeParse).find(r => r && String(r.id) === String(id));
     if (!found) return new Response(JSON.stringify({ error: 'Not found' }), { status: 404 });
