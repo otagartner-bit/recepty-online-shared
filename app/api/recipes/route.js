@@ -11,30 +11,19 @@ function safeParse(val) {
   return null;
 }
 
-// GET – vrátí uložené recepty (umí i starý formát)
 export async function GET() {
   try {
     let items = [];
-
-    // novější ukládání v listu "recipes"
     const list = await kv.lrange('recipes', 0, -1);
     if (Array.isArray(list) && list.length > 0) {
       items = list.map(safeParse).filter(Boolean);
     } else {
-      // legacy: celé pole pod klíčem 'recepty:items'
       const legacy = await kv.get('recepty:items');
       if (Array.isArray(legacy)) {
         items = legacy;
-
-        // volitelná migrace do nového listu:
-        for (const it of legacy) {
-          await kv.rpush('recipes', JSON.stringify(it));
-        }
-        // můžeš smazat starý klíč, pokud chceš:
-        // await kv.del('recepty:items');
+        for (const it of legacy) await kv.rpush('recipes', JSON.stringify(it));
       }
     }
-
     return new Response(JSON.stringify({ items }), {
       headers: { 'content-type': 'application/json' }
     });
@@ -43,7 +32,6 @@ export async function GET() {
   }
 }
 
-// POST – uloží jeden recept
 export async function POST(req) {
   try {
     const { recipe } = await req.json();
@@ -52,6 +40,7 @@ export async function POST(req) {
     }
     const item = { id: recipe.id || crypto.randomUUID(), ...recipe };
     await kv.rpush('recipes', JSON.stringify(item));
+    await kv.set(`recipe:${item.id}`, JSON.stringify(item)); // pro rychlý detail
     return new Response(JSON.stringify({ ok: true, item }), {
       headers: { 'content-type': 'application/json' }
     });
