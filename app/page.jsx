@@ -1,6 +1,17 @@
 'use client';
 import { useEffect, useState } from 'react';
 
+async function safeJson(res) {
+  // Bezpečné parsování – když to není JSON, vrátí text + status
+  try {
+    const data = await res.json();
+    return { ok: res.ok, status: res.status, data, raw: null };
+  } catch {
+    const raw = await res.text().catch(() => '');
+    return { ok: res.ok, status: res.status, data: null, raw };
+  }
+}
+
 export default function Home() {
   const [recipes, setRecipes] = useState([]);
   const [filter, setFilter] = useState('');
@@ -9,26 +20,41 @@ export default function Home() {
 
   async function load() {
     const r = await fetch('/api/recipes', { cache: 'no-store' });
-    const data = await r.json();
+    const { ok, status, data, raw } = await safeJson(r);
+    if (!ok) {
+      alert(`Chyba při načítání seznamu (HTTP ${status}) ${raw || ''}`.trim());
+      return;
+    }
     setRecipes(data.items || []);
   }
+
   useEffect(() => { load(); }, []);
 
   async function handleImport() {
     if (!url) return alert('Vlož URL receptu (https://...)');
+    setLoading(true);
     try {
-      setLoading(true);
-      const imp = await fetch(`/api/import?url=${encodeURIComponent(url)}`);
-      const recipe = await imp.json();
-      if (!imp.ok || recipe.error) throw new Error(recipe.error || 'Import selhal');
+      // 1) Import z cílové stránky
+      const r1 = await fetch(`/api/import?url=${encodeURIComponent(url)}`);
+      const j1 = await safeJson(r1);
+      if (!j1.ok) {
+        throw new Error(`Import selhal (HTTP ${j1.status}) ${j1.data?.error || j1.raw || ''}`.trim());
+      }
+      if (j1.data?.error) {
+        throw new Error(`Import selhal: ${j1.data.error} ${j1.data.message || ''}`.trim());
+      }
+      const recipe = j1.data;
 
-      const save = await fetch('/api/recipes', {
+      // 2) Uložení do KV
+      const r2 = await fetch('/api/recipes', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ recipe })
       });
-      const s = await save.json();
-      if (!save.ok || s.error) throw new Error(s.error || 'Uložení selhalo');
+      const j2 = await safeJson(r2);
+      if (!j2.ok || j2.data?.error) {
+        throw new Error(`Uložení selhalo (HTTP ${j2.status}) ${j2.data?.error || j2.raw || ''}`.trim());
+      }
 
       setUrl('');
       await load();
