@@ -1,14 +1,8 @@
-export const metadata = {
-  title: 'Recepty – sdílený katalog',
-  description: 'Vlož odkaz, sdílej recepty online.'
-};
-
+export const metadata = { title: 'Recepty', description: 'Sdílený katalog receptů' };
 export default function RootLayout({ children }) {
   return (
     <html lang="cs">
-      <body style={{ fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif', background: '#fafafa', color: '#111', margin: 0 }}>
-        {children}
-      </body>
+      <body style={{fontFamily:'system-ui', background:'#fafafa', margin:0}}>{children}</body>
     </html>
   );
 }
