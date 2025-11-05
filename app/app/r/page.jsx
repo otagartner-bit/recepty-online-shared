@@ -1,11 +1,10 @@
-// app/r/page.jsx
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
 export const dynamic = 'force-dynamic';
 
 async function getRecipes() {
-  const res = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL || ''}/api/recipes`, { cache: 'no-store' });
+  const res = await fetch(`/api/recipes`, { cache: 'no-store' });
   if (!res.ok) return { items: [] };
   return res.json();
 }
