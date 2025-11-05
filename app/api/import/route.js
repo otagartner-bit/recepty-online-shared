@@ -4,39 +4,11 @@ export const dynamic = 'force-dynamic';
 import * as cheerio from 'cheerio';
 
 const UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36 RecipeImporter/2.0';
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36 RecipeImporter/2.1';
 
 const clean = (t) => (t || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
-
-// ---------- helpers ----------
 const parseJson = (s) => { try { return JSON.parse(s); } catch { return null; } };
 
-const textListFrom = ($, root) => {
-  if (!root || root.length === 0) return [];
-  // 1) <li>
-  const li = root.find('li');
-  if (li.length) return li.map((_, el) => clean($(el).text())).get().filter(Boolean);
-  // 2) <p>
-  const p = root.find('p');
-  if (p.length) return p.map((_, el) => clean($(el).text())).get().filter(Boolean);
-  // 3) fallback: text rozseknout po řádcích
-  const txt = clean(root.text());
-  if (txt.includes('\n')) return txt.split('\n').map(clean).filter(Boolean);
-  return txt ? [txt] : [];
-};
-
-const gatherBySelectors = ($, selectors) => {
-  for (const sel of selectors) {
-    const node = $(sel).first();
-    if (node && node.length) {
-      const items = textListFrom($, node);
-      if (items.length) return items;
-    }
-  }
-  return [];
-};
-
-// JSON-LD: najdi uzel s @type Recipe (i v @graph / mainEntity)
 function findRecipeNode(obj) {
   if (!obj) return null;
   if (Array.isArray(obj)) {
@@ -46,21 +18,20 @@ function findRecipeNode(obj) {
   const type = obj['@type'];
   const isRecipe = type && (Array.isArray(type) ? type.includes('Recipe') : String(type) === 'Recipe');
   if (isRecipe) return obj;
-  if (obj.mainEntity) { const r = findRecipeNode(obj.mainEntity); if (r) return r; }
-  if (obj['@graph']) { const r = findRecipeNode(obj['@graph']); if (r) return r; }
-  if (obj.graph) { const r = findRecipeNode(obj.graph); if (r) return r; }
-  if (obj.itemListElement) { const r = findRecipeNode(obj.itemListElement); if (r) return r; }
+  for (const key of ['mainEntity', '@graph', 'graph', 'itemListElement']) {
+    if (obj[key]) { const r = findRecipeNode(obj[key]); if (r) return r; }
+  }
   return null;
 }
 
-const normalizeList = (v) => {
+const normList = (v) => {
   if (!v) return [];
   if (typeof v === 'string') return [clean(v)];
-  if (Array.isArray(v)) return v.map(x => clean(String(x))).filter(Boolean);
+  if (Array.isArray(v)) return v.map((x) => clean(String(x))).filter(Boolean);
   return [];
 };
 
-const parseLdSteps = (v) => {
+function parseLdSteps(v) {
   if (!v) return [];
   if (typeof v === 'string') return [clean(v)];
   if (!Array.isArray(v)) return [];
@@ -78,14 +49,36 @@ const parseLdSteps = (v) => {
     }
   }
   return out.filter(Boolean);
-};
+}
 
-// Nadpis → nejbližší následující list
-const listAfterHeading = ($, regex) => {
-  const candidates = $('h1,h2,h3,h4,strong,b').filter((_, el) =>
+function textListFrom($, root) {
+  if (!root || root.length === 0) return [];
+  const li = root.find('li');
+  if (li.length) return li.map((_, el) => clean($(el).text())).get().filter(Boolean);
+  const p = root.find('p');
+  if (p.length) return p.map((_, el) => clean($(el).text())).get().filter(Boolean);
+  const txt = clean(root.text());
+  if (!txt) return [];
+  if (txt.includes('\n')) return txt.split('\n').map(clean).filter(Boolean);
+  return [txt];
+}
+
+function firstListBySelectors($, selectors) {
+  for (const sel of selectors) {
+    const node = $(sel).first();
+    if (node && node.length) {
+      const items = textListFrom($, node);
+      if (items.length) return items;
+    }
+  }
+  return [];
+}
+
+function listAfterHeading($, regex) {
+  const nodes = $('h1,h2,h3,h4,strong,b').filter((_, el) =>
     regex.test(clean($(el).text()).toLowerCase())
   );
-  for (const el of candidates) {
+  for (const el of nodes) {
     const list = $(el).nextAll('ul,ol').first();
     if (list && list.length) {
       const items = list.find('li').map((_, li) => clean($(li).text())).get().filter(Boolean);
@@ -93,20 +86,22 @@ const listAfterHeading = ($, regex) => {
     }
   }
   return [];
-};
+}
 
-// ---------- main GET ----------
 export async function GET(req) {
   try {
     const { searchParams } = new URL(req.url);
     const url = searchParams.get('url');
-    if (!url) return new Response(JSON.stringify({ error: 'Missing url' }), { status: 400 });
+    if (!url) {
+      return new Response(JSON.stringify({ error: 'Missing url' }), { status: 400 });
+    }
 
     const res = await fetch(url, {
       headers: {
         'user-agent': UA,
         'accept-language': 'cs,en;q=0.9',
-        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        accept:
+          'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
       },
       redirect: 'follow',
     });
@@ -117,40 +112,32 @@ export async function GET(req) {
     const html = await res.text();
     const $ = cheerio.load(html);
 
-    // ---------- META ----------
+    // --- META ---
     const ogTitle = clean($('meta[property="og:title"]').attr('content') || $('title').text());
     const ogDesc  = clean($('meta[name="description"]').attr('content') || '');
     const ogImg   = clean($('meta[property="og:image"]').attr('content') || '');
 
-    // ---------- JSON-LD ----------
+    // --- JSON-LD ---
     let recipeLd = null;
     $('script[type="application/ld+json"]').each((_, el) => {
-      const raw = $(el).contents().text();
-      const data = parseJson(raw);
+      const data = parseJson($(el).contents().text());
       const r = findRecipeNode(data);
       if (r && !recipeLd) recipeLd = r;
     });
 
-    let title = clean(recipeLd?.name || ogTitle || 'Recept');
-    let description = clean(recipeLd?.description || ogDesc || '');
-    let image = clean(
-      (Array.isArray(recipeLd?.image) ? recipeLd.image[0] : recipeLd?.image) || ogImg
-    ) || '';
+    const title = clean(recipeLd?.name || ogTitle || 'Recept');
+    const description = clean(recipeLd?.description || ogDesc || '');
+    const image =
+      clean((Array.isArray(recipeLd?.image) ? recipeLd.image[0] : recipeLd?.image) || ogImg) || '';
 
-    // ---------- INGREDIENTS ----------
-    let ingredients = [];
-    if (recipeLd?.recipeIngredient) {
-      ingredients = normalizeList(recipeLd.recipeIngredient);
-    }
+    // --- INGREDIENTS ---
+    let ingredients = normList(recipeLd?.recipeIngredient);
     if (ingredients.length === 0) {
-      // microdata + běžné selektory
-      ingredients = gatherBySelectors($, [
+      ingredients = firstListBySelectors($, [
         '[itemprop="recipeIngredient"]',
         '[itemprop="ingredients"]',
         'ul[itemprop="recipeIngredient"]',
         'ul[itemprop="ingredients"]',
-        'ul[class*="ingredient"]',
-        'ul#ingredients',
         '.ingredients',
         '.ingredient-list',
         '.recipe-ingredients',
@@ -158,22 +145,45 @@ export async function GET(req) {
       ]);
     }
     if (ingredients.length === 0) {
-      // nadpisy v češtině/angličtině
       ingredients = listAfterHeading($, /(ingredients|ingredience|suroviny)/i);
     }
 
-    // ---------- STEPS ----------
-    let steps = [];
-    if (recipeLd?.recipeInstructions) {
-      steps = parseLdSteps(recipeLd.recipeInstructions);
-    }
+    // --- STEPS ---
+    let steps = parseLdSteps(recipeLd?.recipeInstructions);
     if (steps.length === 0) {
-      // microdata HowToStep / text
-      const inst = $('[itemprop="recipeInstructions"]');
+      const inst = $('[itemprop="recipeInstructions"], .instructions, .instruction-list, .recipe-instructions, #instructions');
       if (inst.length) {
         const howTo = inst.find('[itemprop="itemListElement"], [itemprop="step"], [itemprop="HowToStep"]');
-        if (howTo.length) {
-          steps = howTo.map((_, el) => clean($(el).text())).get().filter(Boolean);
-        } else {
-          steps = textListFrom($, inst.first());
-        }
+        steps = howTo.length
+          ? howTo.map((_, el) => clean($(el).text())).get().filter(Boolean)
+          : textListFrom($, inst.first());
+      }
+    }
+    if (steps.length === 0) {
+      steps = listAfterHeading($, /(instructions|postup|method|directions|kroky)/i);
+    }
+
+    // --- TAGS (volitelné) ---
+    let tags = [];
+    const keywords = recipeLd?.keywords || $('meta[name="keywords"]').attr('content') || '';
+    if (typeof keywords === 'string') {
+      tags = keywords.split(/[|,;/]/g).map((t) => clean(t.toLowerCase())).filter(Boolean).slice(0, 12);
+    }
+
+    return new Response(
+      JSON.stringify({
+        id: crypto.randomUUID(),
+        title,
+        description,
+        image,
+        ingredients,
+        steps,
+        tags,
+        source: url,
+      }),
+      { headers: { 'content-type': 'application/json' } }
+    );
+  } catch (e) {
+    return new Response(JSON.stringify({ error: String(e) }), { status: 500 });
+  }
+}
