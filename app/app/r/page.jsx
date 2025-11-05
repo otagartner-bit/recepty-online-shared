@@ -1,25 +1,27 @@
-import Link from "next/link";
-import { redirect } from "next/navigation";
+import { kv } from '@vercel/kv';
+import Link from 'next/link';
+import { redirect } from 'next/navigation';
 
 export const dynamic = 'force-dynamic';
 
-async function getRecipes() {
-  const res = await fetch(`/api/recipes`, { cache: 'no-store' });
-  if (!res.ok) return { items: [] };
-  return res.json();
-}
+const parse = (v) =>
+  typeof v === 'string' ? (() => { try { return JSON.parse(v); } catch { return null; } })() :
+  (v && typeof v === 'object') ? v : null;
 
 export default async function RecipesListPage({ searchParams }) {
-  // pokud přijde ?id=..., rovnou přesměruj na detail
+  // když přijde ?id=..., rovnou přesměruj na /r/<id>
   if (searchParams?.id) {
     redirect(`/r/${searchParams.id}`);
   }
 
-  const { items } = await getRecipes();
+  // rovnou čteme seznam z KV (žádný fetch)
+  const list = await kv.lrange('recipes', 0, -1);
+  const items = Array.isArray(list) ? list.map(parse).filter(Boolean) : [];
 
   return (
     <main style={{maxWidth: 920, margin: '40px auto', padding: 16}}>
       <h1 style={{fontSize: 28, fontWeight: 700, marginBottom: 16}}>Recepty</h1>
+
       {items.length === 0 ? (
         <p>Zatím žádné recepty. Vlož odkaz na homepage a klikni na <b>Importovat</b>.</p>
       ) : (
