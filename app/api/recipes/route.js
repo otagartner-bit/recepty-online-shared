@@ -20,18 +20,14 @@ export async function GET(req) {
       const item = parse(raw);
       if (!item) {
         return new Response(JSON.stringify({ error: 'Not found' }), { status: 404 });
-      }
-      return new Response(JSON.stringify(item), {
-        headers: { 'content-type': 'application/json' },
-      });
+        }
+      return new Response(JSON.stringify(item), { headers: { 'content-type': 'application/json' } });
     }
 
     // jinak vrať seznam
     const list = await kv.lrange('recipes', 0, -1);
     const items = Array.isArray(list) ? list.map(parse).filter(Boolean) : [];
-    return new Response(JSON.stringify({ items }), {
-      headers: { 'content-type': 'application/json' },
-    });
+    return new Response(JSON.stringify({ items }), { headers: { 'content-type': 'application/json' } });
   } catch (e) {
     return new Response(JSON.stringify({ error: String(e) }), { status: 500 });
   }
@@ -44,14 +40,9 @@ export async function POST(req) {
       return new Response(JSON.stringify({ error: 'Invalid data' }), { status: 400 });
     }
     const item = { id: recipe.id || crypto.randomUUID(), ...recipe };
-
-    // uložit
     await kv.set(`recipe:${item.id}`, JSON.stringify(item));
-    await kv.rpush('recipes', JSON.stringify(item)); // jednoduchý index
-
-    return new Response(JSON.stringify({ ok: true, item }), {
-      headers: { 'content-type': 'application/json' },
-    });
+    await kv.rpush('recipes', JSON.stringify(item));
+    return new Response(JSON.stringify({ ok: true, item }), { headers: { 'content-type': 'application/json' } });
   } catch (e) {
     return new Response(JSON.stringify({ error: String(e) }), { status: 500 });
   }
