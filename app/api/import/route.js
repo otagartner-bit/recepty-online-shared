@@ -177,4 +177,3 @@ export async function GET(req) {
         } else {
           steps = textListFrom($, inst.first());
         }
-     
