@@ -1,15 +1,15 @@
-import Link from "next/link";
+import { kv } from '@vercel/kv';
+import Link from 'next/link';
 
 export const dynamic = 'force-dynamic';
 
-async function getRecipe(id) {
-  const res = await fetch(`/api/recipes?id=${encodeURIComponent(id)}`, { cache: 'no-store' });
-  if (!res.ok) return null;
-  return res.json();
-}
+const parse = (v) =>
+  typeof v === 'string' ? (() => { try { return JSON.parse(v); } catch { return null; } })() :
+  (v && typeof v === 'object') ? v : null;
 
 export default async function RecipeDetailPage({ params }) {
-  const recipe = await getRecipe(params.id);
+  const raw = await kv.get(`recipe:${params.id}`);
+  const recipe = parse(raw);
 
   return (
     <main style={{maxWidth: 820, margin: '40px auto', padding: 16}}>
@@ -55,8 +55,7 @@ export default async function RecipeDetailPage({ params }) {
 
           {recipe.source && (
             <p style={{marginTop:24}}>
-              Zdroj:&nbsp;
-              <a href={recipe.source} target="_blank" rel="noreferrer">{recipe.source}</a>
+              Zdroj:&nbsp;<a href={recipe.source} target="_blank" rel="noreferrer">{recipe.source}</a>
             </p>
           )}
         </>
