@@ -1,410 +1,261 @@
+// app/api/import/route.js
+import { JSDOM } from 'jsdom';
+import * as cheerio from 'cheerio';
+
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-import * as cheerio from 'cheerio';
-
-/* ---------- robust fetch ---------- */
 const UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36';
-const COMMON_HEADERS = {
-  'user-agent': UA,
-  accept:
-    'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-  'accept-language': 'en-US,en;q=0.9,cs;q=0.8',
-  'upgrade-insecure-requests': '1',
-};
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36 RecipeImporter/1.2';
 
-const clean = (t) =>
-  (t || '')
+const clean = (s) =>
+  (s || '')
     .replace(/\u00a0/g, ' ')
-    .replace(/\s+\n/g, '\n')
-    .replace(/\n\s+/g, '\n')
-    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\s+/g, ' ')
     .trim();
 
-const j = (s) => { try { return JSON.parse(s); } catch { return null; } };
-const listify = (v) =>
-  Array.isArray(v) ? v.map((x) => clean(String(x))).filter(Boolean)
-  : typeof v === 'string' ? [clean(v)]
-  : [];
+const toArray = (v) => (Array.isArray(v) ? v : v ? [v] : []);
 
-const firstNonEmpty = (...arrs) => {
-  for (const a of arrs) if (Array.isArray(a) && a.length) return a;
-  return [];
-};
+function pickRecipeFromJsonLd(objs) {
+  // vezmeme první objekt typu Recipe (nebo uvnitř @graph)
+  const flat = [];
+  toArray(objs).forEach((o) => {
+    if (!o) return;
+    if (o['@graph']) flat.push(...toArray(o['@graph']));
+    flat.push(o);
+  });
+  const match = flat.find(
+    (o) =>
+      (o['@type'] === 'Recipe') ||
+      (Array.isArray(o['@type']) && o['@type'].includes('Recipe'))
+  );
+  if (!match) return null;
 
-async function fetchHtml(url) {
-  const headers = {
-    ...COMMON_HEADERS,
-    referer: new URL(url).origin + '/',
+  const ing = toArray(match.recipeIngredient).map(clean);
+  const how =
+    toArray(match.recipeInstructions)
+      .map((step) => {
+        if (typeof step === 'string') return clean(step);
+        if (step && typeof step === 'object') {
+          if (step.text) return clean(step.text);
+          if (step.itemListElement) {
+            return toArray(step.itemListElement)
+              .map((x) => (typeof x === 'string' ? clean(x) : clean(x.text)))
+              .filter(Boolean)
+              .join(' ');
+          }
+        }
+        return '';
+      })
+      .filter(Boolean) || [];
+
+  const out = {
+    title: clean(match.name),
+    description: clean(match.description || ''),
+    image:
+      (typeof match.image === 'string'
+        ? match.image
+        : match.image && match.image.url) || '',
+    ingredients: ing,
+    steps: how.length ? how : [],
+    servings: clean(match.recipeYield || ''),
+    time:
+      clean(
+        [match.totalTime, match.cookTime, match.prepTime].filter(Boolean).join(' ')
+      ) || '',
+    tags: toArray(match.keywords)
+      .join(', ')
+      .split(',')
+      .map((t) => clean(t).toLowerCase())
+      .filter(Boolean),
   };
-  const res = await fetch(url, { headers, redirect: 'follow', cache: 'no-store' });
-  const text = await res.text().catch(() => '');
-  if (!res.ok) {
-    const msg = text?.slice(0, 300) || res.statusText || 'Unknown';
-    throw new Error(`Fetch ${res.status}: ${msg}`);
-  }
-  return cheerio.load(text);
-}
-
-/* ---------- JSON-LD ---------- */
-const isRecipeType = (v) => {
-  if (!v) return false;
-  if (Array.isArray(v)) return v.some((x) => String(x).toLowerCase() === 'recipe');
-  return String(v).toLowerCase() === 'recipe';
-};
-function pickRecipe(node) {
-  if (!node) return null;
-  if (isRecipeType(node['@type'])) return node;
-  if (Array.isArray(node)) {
-    for (const n of node) { const r = pickRecipe(n); if (r) return r; }
-    return null;
-  }
-  for (const k of ['mainEntity', '@graph', 'graph', 'itemListElement']) {
-    const r = pickRecipe(node[k]);
-    if (r) return r;
-  }
-  return null;
-}
-function parseLdSteps(v) {
-  if (!v) return [];
-  const out = [];
-  const push = (s) => { const t = clean(s); if (t) out.push(t); };
-  const walk = (n) => {
-    if (!n) return;
-    if (typeof n === 'string') return push(n);
-    if (Array.isArray(n)) return n.forEach(walk);
-    if (n.itemListElement) return walk(n.itemListElement);
-    if (n.steps) return walk(n.steps);
-    push(n.text || n.name || n.description || '');
-  };
-  walk(v);
+  // validace
+  if (!out.ingredients.length && !out.steps.length) return null;
   return out;
 }
-function parseJsonLd($) {
-  const scripts = $('script[type="application/ld+json"]')
-    .map((_, el) => $(el).contents().text())
-    .get()
-    .filter(Boolean);
 
-  let cand = null;
-  for (const raw of scripts) {
-    const chunks = raw
-      .replace(/<\/?script[^>]*>/gi, '')
-      .split(/(?<=\})\s*(?=\{)|\n(?=\s*\{)/)
-      .map((s) => s.trim())
-      .filter(Boolean);
-    for (const ch of chunks) {
-      const data = j(ch);
-      if (!data) continue;
-      const r = pickRecipe(data);
-      if (r) { cand = r; break; }
-    }
-    if (cand) break;
+function extractBySelectors($) {
+  // WPRM (Love & Lemons apod.)
+  let ingredients = $('ul.wprm-recipe-ingredients li .wprm-recipe-ingredient, ul.wprm-recipe-ingredients li')
+    .map((_, el) => clean($(el).text()))
+    .get();
+  let steps = $('div.wprm-recipe-instructions-container li .wprm-recipe-instruction-text, ol.wprm-recipe-instructions li, .wprm-recipe-instruction-text')
+    .map((_, el) => clean($(el).text()))
+    .get();
+
+  // Tasty Recipes (Pinch of Yum)
+  if (!ingredients.length) {
+    ingredients = $('.tasty-recipes-ingredients li')
+      .map((_, el) => clean($(el).text()))
+      .get();
   }
-  if (!cand) return null;
+  if (!steps.length) {
+    steps = $('.tasty-recipes-instructions li')
+      .map((_, el) => clean($(el).text()))
+      .get();
+  }
+
+  // Obecné zálohy: najít H2/H3 "Ingredients" / "Method" (Ottolenghi)
+  const grabSection = (headingRegex) => {
+    const start = $('h1,h2,h3')
+      .filter((_, el) => headingRegex.test($(el).text().trim()))
+      .first();
+    if (!start.length) return [];
+    const out = [];
+    let n = start.next();
+    while (n.length && !/^(H1|H2|H3)$/i.test(n.get(0).tagName || '')) {
+      if (n.is('ul,ol')) {
+        n.find('li').each((_, li) => out.push(clean($(li).text())));
+      } else if (n.is('p')) {
+        const t = clean(n.text());
+        if (t) out.push(t);
+      }
+      n = n.next();
+    }
+    return out.filter(Boolean);
+  };
+
+  if (!ingredients.length) ingredients = grabSection(/ingredients?/i);
+  if (!steps.length)
+    steps = grabSection(/method|instructions?|procedure|postup/i);
+
+  const title =
+    clean($('meta[property="og:title"]').attr('content')) ||
+    clean($('title').first().text());
+  const description =
+    clean($('meta[name="description"]').attr('content')) || '';
+  const image =
+    $('meta[property="og:image"]').attr('content') ||
+    $('meta[name="twitter:image"]').attr('content') ||
+    '';
+
   return {
-    title: clean(cand.name),
-    description: clean(cand.description),
-    image: clean(Array.isArray(cand.image) ? cand.image[0] : cand.image),
-    ingredients: listify(cand.recipeIngredient),
-    steps: parseLdSteps(cand.recipeInstructions),
+    title,
+    description,
+    image,
+    ingredients,
+    steps,
   };
 }
 
-/* ---------- pluginy ---------- */
-// Tasty
-const tastyIngredients = ($) =>
-  $('.tasty-recipes .tasty-recipes-ingredients li,.tasty-recipes-ingredients li,.tasty-recipe-ingredients li')
-    .map((_, el) => clean($(el).text())).get().filter(Boolean);
-const tastySteps = ($) => {
-  const li = $('.tasty-recipes .tasty-recipes-instructions li,.tasty-recipes-instructions li,.tasty-recipe-instructions li')
-    .map((_, el) => clean($(el).text())).get().filter(Boolean);
-  if (li.length) return li;
-  return $('.tasty-recipes .tasty-recipes-instructions p,.tasty-recipes-instructions p')
-    .map((_, el) => clean($(el).text())).get().filter(Boolean);
-};
-// WPRM
-function wprmIngredients($) {
-  const rows = $('.wprm-recipe-ingredients-container .wprm-recipe-ingredient, .wprm-recipe-ingredients .wprm-recipe-ingredient');
-  if (rows.length) {
-    const items = rows.map((_, el) => {
-      const $el = $(el);
-      const amount = clean($el.find('.wprm-recipe-ingredient-amount').text());
-      const unit = clean($el.find('.wprm-recipe-ingredient-unit').text());
-      const name = clean(
-        $el.find('.wprm-recipe-ingredient-name').text() ||
-        $el.find('.wprm-recipe-ingredient').text()
-      );
-      const notes = clean($el.find('.wprm-recipe-ingredient-notes').text());
-      return clean([amount, unit, name, notes].filter(Boolean).join(' ')) || clean($el.text());
-    }).get().filter(Boolean);
-    if (items.length) return items;
-  }
-  return $('.wprm-recipe-ingredients-container li, .wprm-recipe-ingredients li')
-    .map((_, el) => clean($(el).text())).get().filter(Boolean);
-}
-function wprmSteps($) {
-  const steps = $('.wprm-recipe-instructions-container .wprm-recipe-instruction, .wprm-recipe-instruction')
-    .map((_, el) => clean($(el).find('.wprm-recipe-instruction-text').text() || $(el).text()))
-    .get().filter(Boolean);
-  if (steps.length) return steps;
-  return $('.wprm-recipe-instructions-container li, .wprm-recipe-instructions li')
-    .map((_, el) => clean($(el).text())).get().filter(Boolean);
-}
-// Mediavine
-const mvIngredients = ($) =>
-  $('.mv-create-ingredients li, .mv-create-ingredients .mv-create-list-item')
-    .map((_, el) => clean($(el).text())).get().filter(Boolean);
-const mvSteps = ($) =>
-  $('.mv-create-instructions li, .mv-create-instructions .mv-create-list-item')
-    .map((_, el) => clean($(el).text())).get().filter(Boolean);
-// WPZOOM
-const wpzIngredients = ($) =>
-  $('.wpzoom-recipe-card .ingredients-list li,.wp-block-wpzoom-recipe-card-block-recipe-card .ingredients-list li')
-    .map((_, el) => clean($(el).text())).get().filter(Boolean);
-const wpzSteps = ($) =>
-  $('.wpzoom-recipe-card .directions-list li,.wp-block-wpzoom-recipe-card-block-recipe-card .directions-list li')
-    .map((_, el) => clean($(el).text())).get().filter(Boolean);
-// EasyRecipe / Yumprint
-const easyIngredients = ($) =>
-  $('.ERIngredients li, .easyrecipe .ingredients li, .yumprint-recipe-ingredients li')
-    .map((_, el) => clean($(el).text())).get().filter(Boolean);
-const easySteps = ($) =>
-  $('.ERInstructions li, .easyrecipe .instructions li, .yumprint-recipe-directions li')
-    .map((_, el) => clean($(el).text())).get().filter(Boolean);
-
-/* ---------- heading-based ---------- */
-function collectAfterHeading($, headEl) {
-  const outBlocks = [];
-  let $n = $(headEl).next();
-  while ($n && $n.length) {
-    if ($n.is('h1,h2,h3,h4,strong,b')) break;
-
-    if ($n.is('ul,ol')) {
-      const items = $n.find('li').map((_, li) => clean($(li).text())).get().filter(Boolean);
-      if (items.length) outBlocks.push(items);
-    }
-    if ($n.is('table')) {
-      const rows = $n.find('tr').map((_, tr) => {
-        const cells = $(tr).find('th,td').map((__, td) => clean($(td).text())) .get().filter(Boolean);
-        return clean(cells.join(' '));
-      }).get().filter(Boolean);
-      if (rows.length) outBlocks.push(rows);
-    }
-    if ($n.is('p,div,section,article')) {
-      const c = $n.clone(); c.find('br').replaceWith('\n');
-      const lines = clean(c.text()).split('\n').map(clean).filter(Boolean);
-      if (lines.length >= 2) outBlocks.push(lines);
-    }
-
-    $n = $n.next();
-  }
-  const flat = outBlocks.flat().map(clean).filter(Boolean);
-  const seen = new Set(); const uniq = [];
-  for (const x of flat) if (!seen.has(x)) { seen.add(x); uniq.push(x); }
-  return uniq;
-}
-function headingIngredients($) {
-  let nodes = $('h1,h2,h3,h4,strong,b').filter((_, el) =>
-    /(ingredients|ingredience|suroviny)/i.test(clean($(el).text()))
-  );
-  if (nodes.length) {
-    const all = []; nodes.each((_, el) => { all.push(...collectAfterHeading($, el)); });
-    if (all.length) return all;
-  }
-  // Ottolenghi – sekce LABNEH / TO SERVE apod.
-  const stopRe = /(method|instructions|postup|directions|kroky)/i;
-  const subs = $('h2,h3,h4,strong,b').filter((_, el) => {
-    const t = clean($(el).text()).toLowerCase();
-    return t && !stopRe.test(t) && t.length <= 50;
-  });
-  if (subs.length) {
-    const out = []; subs.each((_, el) => { const b = collectAfterHeading($, el); if (b.length) out.push(...b); });
-    if (out.length) return out;
-  }
-  return [];
-}
-function headingSteps($) {
-  const method = $('h1,h2,h3,h4,strong,b').filter((_, el) =>
-    /(method|instructions|postup|directions|kroky)/i.test(clean($(el).text()))
-  );
-  if (method.length) {
-    const items = collectAfterHeading($, method.get(0));
-    if (items.length) return items;
-  }
-  const lastHead = $('h1,h2,h3,h4,strong,b').last();
-  if (lastHead && lastHead.length) {
-    const maybe = collectAfterHeading($, lastHead);
-    if (maybe.length) return maybe;
-  }
-  return [];
-}
-
-/* ---------- text fallback ---------- */
-function textFallback($) {
-  const $body = $('body').clone();
-  $body.find('li,tr').prepend('\n').append('\n');
-  $body.find('p,div,section,article').append('\n');
-  $body.find('br').replaceWith('\n');
-
-  const raw = clean($body.text()).replace(/\n{2,}/g, '\n');
-  const lower = raw.toLowerCase();
-
-  const findIdx = (labels, from = 0) => {
-    let idx = -1;
-    for (const l of labels) {
-      const i = lower.indexOf(l, from);
-      if (i !== -1) idx = idx === -1 ? i : Math.min(idx, i);
-    }
-    return idx;
-  };
-
-  const ING = ['\ningredients\n','\ningredience\n','\nsuroviny\n','ingredients\n','ingredience\n','suroviny\n'];
-  const STEPS = ['\nmethod\n','\ninstructions\n','\npostup\n','\ndirections\n','method\n','instructions\n','postup\n','directions\n'];
-
-  const iStart = findIdx(ING);
-  if (iStart === -1) return { ingredients: [], steps: [] };
-  const sStart = findIdx(STEPS, iStart + 1);
-
-  const toLines = (txt) =>
-    txt.split('\n').map(clean).filter((x) =>
-      x &&
-      !/^(ingredients|ingredience|suroviny|method|instructions|postup|directions)$/i.test(x)
-    );
-
-  let ingredients = toLines(sStart !== -1 ? raw.slice(iStart, sStart) : raw.slice(iStart));
-  let steps = toLines(sStart !== -1 ? raw.slice(sStart) : '');
-
-  // heuristika: sekční nadpisy bez jednotek vyházej, pokud je seznam dost dlouhý
-  const looksLikeHeader = (ln) =>
-    !/[0-9]/.test(ln) && !/(tsp|tbsp|g|kg|ml|l|cup|cups|oz|ounce|teaspoon|tablespoon)/i.test(ln);
-  if (ingredients.length > 6) ingredients = ingredients.filter((ln) => !looksLikeHeader(ln));
-
-  if (steps.length < 3 && steps.join(' ').includes('. ')) {
-    steps = steps.join(' ').split(/(?<=\.)\s+/).map(clean).filter(Boolean);
-  }
-
-  return { ingredients, steps };
-}
-
-/* ---------- generic ---------- */
-const genericIngredients = ($) => {
-  const s1 = $('[itemprop="recipeIngredient"], [itemprop="ingredients"]')
-    .map((_, el) => clean($(el).text())).get().filter(Boolean);
-  if (s1.length) return s1;
-  for (const sel of ['.ingredients','.ingredient-list','.recipe-ingredients','#ingredients']) {
-    const box = $(sel).first();
-    if (box?.length) {
-      const list = box.find('li').map((_, el) => clean($(el).text())).get().filter(Boolean);
-      if (list.length) return list;
-    }
-  }
-  return headingIngredients($);
-};
-const genericSteps = ($) => {
-  const holder = $('[itemprop="recipeInstructions"]').first();
-  if (holder?.length) {
-    const li = holder.find('li'); if (li.length) return li.map((_, el) => clean($(el).text())).get().filter(Boolean);
-    const p = holder.find('p'); if (p.length) return p.map((_, el) => clean($(el).text())).get().filter(Boolean);
-    const txt = clean(holder.text());
-    if (txt.includes('\n')) return txt.split('\n').map(clean).filter(Boolean);
-    if (txt) return [txt];
-  }
-  for (const sel of ['.instructions','.instruction-list','.recipe-instructions','#instructions']) {
-    const box = $(sel).first();
-    if (box?.length) {
-      const li = box.find('li'); if (li.length) return li.map((_, el) => clean($(el).text())).get().filter(Boolean);
-      const p = box.find('p'); if (p.length) return p.map((_, el) => clean($(el).text())).get().filter(Boolean);
-    }
-  }
-  return headingSteps($);
-};
-
-/* ---------- handler ---------- */
 export async function GET(req) {
-  const u = new URL(req.url);
-  const target = u.searchParams.get('url');
+  const { searchParams } = new URL(req.url);
+  const target = searchParams.get('url');
   if (!target) {
-    return new Response(JSON.stringify({
-      error: 'Missing url',
-      hint: '/api/import?url=https://pinchofyum.com/instant-pot-spicy-short-rib-noodle-soup'
-    }), { status: 400 });
+    return new Response(JSON.stringify({ error: 'Missing url' }), {
+      status: 400,
+    });
   }
 
   try {
-    const $ = await fetchHtml(target);
+    const res = await fetch(target, {
+      // Klíčové hlavičky, jinak některé weby vrací 403/404
+      headers: {
+        'user-agent': UA,
+        accept:
+          'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'accept-language': 'en-GB,en;q=0.9,cs;q=0.8',
+        referer: new URL(target).origin + '/',
+        'cache-control': 'no-cache',
+      },
+      redirect: 'follow',
+      // Pro jistotu, ať se Vercel nepokouší o revalidaci
+      cache: 'no-store',
+    });
 
-    // 1) JSON-LD
-    let meta = parseJsonLd($);
+    if (!res.ok) {
+      return new Response(
+        JSON.stringify({ error: 'Fetch failed', status: res.status }),
+        { status: 502 }
+      );
+    }
 
-    // 2) pluginy (první NEprázdné)
-    let ingredients = firstNonEmpty(
-      tastyIngredients($),
-      wprmIngredients($),
-      mvIngredients($),
-      wpzIngredients($),
-      easyIngredients($)
-    );
-    let steps = firstNonEmpty(
-      tastySteps($),
-      wprmSteps($),
-      mvSteps($),
-      wpzSteps($),
-      easySteps($)
-    );
+    const html = await res.text();
+    const $ = cheerio.load(html);
 
-    // 3) generic / heading
-    if (!ingredients.length) ingredients = genericIngredients($);
-    if (!steps.length) steps = genericSteps($);
-
-    // 4) AMP fallback
-    if ((!ingredients.length || !steps.length) && !/\/amp\/?$/.test(target)) {
+    // 1) JSON-LD (Schema.org/Recipe) – nejspolehlivější
+    let jsonldData = [];
+    $('script[type="application/ld+json"]').each((_, el) => {
+      const txt = $(el).contents().text();
       try {
-        const ampUrl = target.replace(/\/$/, '') + '/amp/';
-        const $amp = await fetchHtml(ampUrl);
-        if (!meta) meta = parseJsonLd($amp);
-        if (!ingredients.length) ingredients = genericIngredients($amp);
-        if (!steps.length) steps = genericSteps($amp);
-      } catch { /* ignore */ }
+        const parsed = JSON.parse(txt);
+        jsonldData.push(parsed);
+      } catch {}
+    });
+    let recipe = pickRecipeFromJsonLd(jsonldData);
+
+    // 2) Selektory (WPRM / Tasty / fallback pro Ottolenghi)
+    if (!recipe) {
+      const scraped = extractBySelectors($);
+      if (scraped.ingredients.length || scraped.steps.length) {
+        recipe = scraped;
+      }
     }
 
-    // 5) text fallback
-    if (!ingredients.length || !steps.length) {
-      const tf = textFallback($);
-      if (!ingredients.length) ingredients = tf.ingredients || [];
-      if (!steps.length) steps = tf.steps || [];
+    // 3) Poslední pojistka: aspoň titulek / popis
+    if (!recipe) {
+      const dom = new JSDOM(html, { url: target });
+      const t =
+        clean($('meta[property="og:title"]').attr('content')) ||
+        clean(dom.window.document.title) ||
+        'Recept';
+      const d =
+        clean($('meta[name="description"]').attr('content')) || '';
+      const img =
+        $('meta[property="og:image"]').attr('content') ||
+        $('meta[name="twitter:image"]').attr('content') ||
+        '';
+      recipe = {
+        title: t,
+        description: d,
+        image: img,
+        ingredients: [],
+        steps: [],
+      };
     }
 
-    const title =
-      clean(meta?.title) ||
-      clean($('meta[property="og:title"]').attr('content') || $('title').text()) ||
-      'Recept';
-    const description =
-      clean(meta?.description) ||
-      clean($('meta[name="description"]').attr('content')) ||
-      '';
-    const image =
-      clean(meta?.image) ||
-      clean($('meta[property="og:image"]').attr('content') || '');
+    // doplnění + tagy
+    recipe.title = recipe.title || 'Recept';
+    recipe.description = recipe.description || '';
+    recipe.image = recipe.image || '';
+    recipe.source = target;
 
+    // jednoduché štítky (heuristika)
+    const textBlob =
+      [recipe.title, recipe.description, ...recipe.ingredients, ...recipe.steps]
+        .join(' ')
+        .toLowerCase();
+
+    const tags = new Set();
+    if (/lentil|čo(č|c)ka/.test(textBlob)) tags.add('luštěniny');
+    if (/beef|hov(ě|e)z(í|i)|short rib/.test(textBlob)) tags.add('hovězí');
+    if (/chicken|ku(ř|r)e/.test(textBlob)) tags.add('kuřecí');
+    if (/noodle|ramen|udon|soba|nudle/.test(textBlob)) tags.add('nudle');
+    if (/soup|pol(é|e)vka/.test(textBlob)) tags.add('polévka');
+    if (/salad|sal(á|a)t/.test(textBlob)) tags.add('salát');
+    if (/gochujang|kimchi|ramen/.test(textBlob)) tags.add('asijské');
+    if (/za'?atar|tahini|labneh|sumac|urfa|harissa/.test(textBlob))
+      tags.add('blízký východ');
+
+    recipe.tags = Array.from(tags);
+
+    // ID – když už jedno je v query parametrech frontendu, respektujeme ho
+    const id =
+      (req.headers.get('x-recipe-id') || '') ||
+      crypto.randomUUID();
+
+    const payload = {
+      id,
+      ...recipe,
+    };
+
+    return new Response(JSON.stringify(payload), {
+      headers: { 'content-type': 'application/json' },
+    });
+  } catch (err) {
     return new Response(
-      JSON.stringify({
-        id: crypto.randomUUID(),
-        title,
-        description,
-        image,
-        ingredients,
-        steps,
-        tags: [],
-        source: target,
-      }),
-      { headers: { 'content-type': 'application/json' } }
+      JSON.stringify({ error: String(err?.message || err) }),
+      { status: 500 }
     );
-  } catch (e) {
-    return new Response(JSON.stringify({
-      error: 'Importer failed',
-      detail: String(e)
-    }), { status: 500, headers: { 'content-type': 'application/json' } });
   }
 }
