@@ -1,5 +1,7 @@
 // app/api/import/route.js
 import * as cheerio from 'cheerio';
+import { JSDOM } from 'jsdom';
+import { Readability } from '@mozilla/readability';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -11,7 +13,7 @@ const H = {
   'user-agent': UA,
   accept:
     'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-  'accept-language': 'en-US,en;q=0.9,cs;q=0.8',
+  'accept-language': 'en-US,en;q=0.9,cs;q=0.8,sk;q=0.7',
   'upgrade-insecure-requests': '1',
   'cache-control': 'no-cache',
 };
@@ -32,8 +34,8 @@ async function fetchHtml(url, useProxy = false) {
   const headers = { ...H, referer: u.origin + '/' };
   let finalUrl = url;
 
+  // tichý fallback kvůli anti-botu / CookieWall
   if (useProxy) {
-    // tichý fallback přes veřejný reader (pomáhá na anti-bot webech)
     const scheme = u.protocol.replace(':', '');
     finalUrl = `https://r.jina.ai/${scheme}://${u.host}${u.pathname}${u.search}`;
   }
@@ -48,7 +50,7 @@ async function fetchHtml(url, useProxy = false) {
   return { ok: res.ok, status: res.status, text };
 }
 
-/* ===== JSON-LD (Recipe) ===== */
+/* ============ JSON-LD (Recipe) ============ */
 function isRecipeType(v) {
   if (!v) return false;
   if (Array.isArray(v)) return v.some((x) => String(x).toLowerCase() === 'recipe');
@@ -135,7 +137,7 @@ function parseJsonLd($) {
   };
 }
 
-/* ===== Plugin selektory (Love&Lemons – WPRM, Pinch of Yum – Tasty, apod.) ===== */
+/* ============ Plugin selektory (WPRM/Tasty/Mediavine/WPZOOM/itemprop) ============ */
 const grab = ($, sel) => $(sel).map((_, el) => clean($(el).text())).get().filter(Boolean);
 
 function byCommonPlugins($) {
@@ -157,7 +159,7 @@ function byCommonPlugins($) {
     grab($, '.wprm-recipe-instruction-text, .wprm-recipe-instructions li') ||
     grab($, 'ol.wprm-recipe-instructions li');
 
-  // Tasty Recipes (Pinch of Yum – uvedeno pro úplnost)
+  // Tasty Recipes (Pinch of Yum)
   if (!ingredients.length) ingredients = grab($, '.tasty-recipes-ingredients li');
   if (!steps.length) steps = grab($, '.tasty-recipes-instructions li');
 
@@ -184,85 +186,14 @@ function byCommonPlugins($) {
   return { ingredients: uniq(ingredients), steps: uniq(steps) };
 }
 
-/* ===== Per-domain extraktory ===== */
-
-// madebykristina.cz – text je často formátovaný sekcemi „Na ...“, „Na servis“, + dlouhý postup.
-function extractMadeByKristina($) {
-  const title =
-    clean($('meta[property="og:title"]').attr('content')) ||
-    clean($('title').text());
-  const description = clean($('meta[name="description"]').attr('content') || '');
-  const image =
-    $('meta[property="og:image"]').attr('content') ||
-    $('meta[name="twitter:image"]').attr('content') ||
-    '';
-
-  const sections = [];
-  $('h2,h3,strong,b').each((_, el) => {
-    const t = clean($(el).text());
-    if (/^Na\s|Na\sservis|Na\sdochucen/i.test(t)) {
-      const items = [];
-      let n = $(el).parent().next();
-      // projdi několik sousedů, dokud nenarazíš na další nadpis
-      for (let i = 0; i < 10 && n.length; i++) {
-        if (/^H[1-4]$/i.test(n.get(0).tagName || '')) break;
-        if (n.is('ul,ol')) n.find('li').each((_, li) => items.push(clean($(li).text())));
-        if (n.is('p,div')) {
-          const txt = clean(n.text());
-          // rozdělení na řádky „• “, „-“ apod.
-          txt.split(/\n|·|•|-/).forEach((x) => {
-            const y = clean(x);
-            if (y && y.length < 140) items.push(y);
-          });
-        }
-        n = n.next();
-      }
-      if (items.length) sections.push(...items);
-    }
-  });
-
-  // kroky – vezmeme úvod a „postup“ od prvního „A teď / Postup / Pak / Přidej“
-  const allP = $('article, .content, main')
-    .find('p,li')
-    .map((_, el) => clean($(el).text()))
-    .get()
-    .filter(Boolean);
-
-  const steps = uniq(
-    allP
-      .filter(
-        (t) =>
-          /Postup|A teď|Pak|Poté|Přidej|Přidám|Vyndám|Opeču|Zaliju|Podávám/i.test(t) ||
-          (t.split(' ').length > 6 && /[\.!]/.test(t))
-      )
-  );
-
-  return {
-    title,
-    description,
-    image,
-    ingredients: uniq(sections),
-    steps,
-  };
-}
-
-// ottolenghi.co.uk – blogs/recipes: „Ingredients“, „Method“
-function extractOttolenghi($) {
-  const title =
-    clean($('meta[property="og:title"]').attr('content')) ||
-    clean($('title').text());
-  const description = clean($('meta[name="description"]').attr('content') || '');
-  const image =
-    $('meta[property="og:image"]').attr('content') ||
-    $('meta[name="twitter:image"]').attr('content') ||
-    '';
-
+/* ============ Nadpisy (Ingredients / Instructions / Suroviny / Postup) ============ */
+function fromHeadings($) {
   const collectAfter = (start) => {
     const out = [];
     let n = start.next();
     while (n.length && !/^(H1|H2|H3|H4)$/i.test(n.get(0).tagName || '')) {
       if (n.is('ul,ol')) n.find('li').each((_, li) => out.push(clean($(li).text())));
-      else if (n.is('p,div,section')) {
+      else if (n.is('p,div,section,article')) {
         const t = clean(n.text());
         if (t) out.push(t);
       }
@@ -272,51 +203,96 @@ function extractOttolenghi($) {
   };
 
   const ingHead = $('h1,h2,h3,h4,strong,b')
-    .filter((_, el) => /ingredients?/i.test(clean($(el).text())))
+    .filter((_, el) => /ingredients?|ingredience|suroviny/i.test(clean($(el).text())))
     .first();
-  const methHead = $('h1,h2,h3,h4,strong,b')
-    .filter((_, el) => /method|instructions?/i.test(clean($(el).text())))
+  const stepHead = $('h1,h2,h3,h4,strong,b')
+    .filter((_, el) => /method|instructions?|postup|directions|kroky/i.test(clean($(el).text())))
     .first();
 
   const ingredients = ingHead.length ? collectAfter(ingHead) : [];
-  const steps = methHead.length ? collectAfter(methHead) : [];
+  const steps = stepHead.length ? collectAfter(stepHead) : [];
 
-  return { title, description, image, ingredients, steps };
+  return { ingredients, steps };
 }
 
-// bbcgoodfood.com – má spolehlivý JSON-LD
-function extractBBC($) {
-  const ld = parseJsonLd($);
-  if (ld) return ld;
-  // záloha
-  const title =
-    clean($('meta[property="og:title"]').attr('content')) ||
-    clean($('title').text());
-  const description = clean($('meta[name="description"]').attr('content') || '');
-  const image =
-    $('meta[property="og:image"]').attr('content') ||
-    $('meta[name="twitter:image"]').attr('content') ||
-    '';
-  const ingredients = grab($, '.recipe__ingredients li, .ingredients-list__group li, .ingredients-list__item');
-  const steps = grab($, '.method__list li, .method__item, .grouped__method .list-item');
-  return { title, description, image, ingredients, steps };
+/* ============ Readability fallback (funguje i na madebykristina.cz) ============ */
+function fallbackFromReadable(html, baseUrl) {
+  const dom = new JSDOM(html, { url: baseUrl });
+  const reader = new Readability(dom.window.document);
+  const article = reader.parse();
+  const text = clean(article?.textContent || '');
+  if (!text) return { title: '', description: '', ingredients: [], steps: [] };
+
+  // Rozdělení podle sekcí (CZ/EN)
+  // najdi blok „Ingredients / Ingredience / Suroviny“ a „Instructions / Method / Postup“
+  const lower = text.toLowerCase();
+
+  const findIndex = (labels, from = 0) => {
+    let idx = -1;
+    for (const l of labels) {
+      const i = lower.indexOf(l, from);
+      if (i !== -1) idx = idx === -1 ? i : Math.min(idx, i);
+    }
+    return idx;
+  };
+
+  const ING = ['\ningredients\n','\ningredience\n','\nsuroviny\n',' ingredients\n',' ingredience\n',' suroviny\n'];
+  const STEPS = ['\ninstructions\n','\nmethod\n','\npostup\n',' instructions\n',' method\n',' postup\n'];
+
+  const iStart = findIndex(ING);
+  const sStart = findIndex(STEPS, iStart !== -1 ? iStart + 1 : 0);
+
+  const slice = (s, e) => clean(text.slice(Math.max(0, s), e > 0 ? e : undefined));
+
+  let ingredients = [];
+  let steps = [];
+
+  if (iStart !== -1) {
+    const ingBlock = slice(iStart, sStart);
+    ingredients = ingBlock
+      .split(/\n+/)
+      .map(clean)
+      .filter((l) => l && l.length < 180 && !/^(ingredients?|ingredience|suroviny)$/i.test(l));
+  }
+
+  if (sStart !== -1) {
+    const stepBlock = slice(sStart);
+    // rozděl věty / odrážky
+    const raw = stepBlock.split(/\n+|(?<=\.)\s+(?=[A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ])/);
+    steps = raw
+      .map(clean)
+      .filter((l) => l && !/^(instructions?|method|postup|directions?)$/i.test(l));
+  }
+
+  // když na MK nejsou čisté nadpisy, ber „Na …“ jako ingredience
+  if (!ingredients.length) {
+    const lines = text.split('\n').map(clean);
+    const maybeIng = lines.filter((l) =>
+      /^(na\s+.+|suroviny|ingredience)\b/i.test(l)
+    );
+    // vezmi 5–12 řádků po takové hlavičce
+    for (const hl of maybeIng) {
+      const idx = lines.indexOf(hl);
+      const chunk = lines.slice(idx + 1, idx + 12).map(clean).filter(Boolean);
+      for (const c of chunk) if (c.length < 160) ingredients.push(c);
+    }
+  }
+
+  // basic meta
+  const title = clean(article?.title || dom.window.document.title || '');
+  const description = clean(
+    dom.window.document.querySelector('meta[name="description"]')?.content || ''
+  );
+
+  return {
+    title,
+    description,
+    ingredients: uniq(ingredients),
+    steps: uniq(steps),
+  };
 }
 
-// loveandlemons.com – WPRM jistota
-function extractLoveAndLemons($) {
-  const base = byCommonPlugins($);
-  const title =
-    clean($('meta[property="og:title"]').attr('content')) ||
-    clean($('title').text());
-  const description = clean($('meta[name="description"]').attr('content') || '');
-  const image =
-    $('meta[property="og:image"]').attr('content') ||
-    $('meta[name="twitter:image"]').attr('content') ||
-    '';
-  return { title, description, image, ...base };
-}
-
-/* ===== tagy ===== */
+/* ============ tagy ============ */
 function autoTags(recipe) {
   const blob = [recipe.title, recipe.description, ...(recipe.ingredients || []), ...(recipe.steps || [])]
     .join(' ')
@@ -324,16 +300,16 @@ function autoTags(recipe) {
   const tags = new Set();
   if (/pol(é|e)vka|soup/.test(blob)) tags.add('polévka');
   if (/sal(á|a)t|salad/.test(blob)) tags.add('salát');
-  if (/beef|hov(ě|e)z/i.test(blob)) tags.add('hovězí');
-  if (/chicken|ku(ř|r)e/i.test(blob)) tags.add('kuřecí');
-  if (/lentil|čo(č|c)ka/i.test(blob)) tags.add('luštěniny');
-  if (/noodle|ramen|udon|soba|nudle/i.test(blob)) tags.add('nudle');
-  if (/tahini|za'?atar|sumac|labneh|urfa|harissa/i.test(blob)) tags.add('blízký východ');
-  if (/gochujang|kimchi|ramen|soy sauce|sojov(á|a)/i.test(blob)) tags.add('asijské');
+  if (/beef|hov(ě|e)z/.test(blob)) tags.add('hovězí');
+  if (/chicken|ku(ř|r)e/.test(blob)) tags.add('kuřecí');
+  if (/lentil|čo(č|c)ka/.test(blob)) tags.add('luštěniny');
+  if (/noodle|ramen|udon|soba|nudle/.test(blob)) tags.add('nudle');
+  if (/tahini|za'?atar|sumac|labneh|urfa|harissa/.test(blob)) tags.add('blízký východ');
+  if (/gochujang|kimchi|ramen|soy sauce|sojov(á|a)/.test(blob)) tags.add('asijské');
   return Array.from(tags);
 }
 
-/* ===== hlavní handler ===== */
+/* ============ hlavní handler ============ */
 export async function GET(req) {
   const { searchParams } = new URL(req.url);
   const target = searchParams.get('url');
@@ -342,124 +318,130 @@ export async function GET(req) {
   }
 
   try {
+    // 1) direct
     const a = await fetchHtml(target, false);
-    const variants = [a];
+    // 2) proxy fallback
+    const b = await fetchHtml(target, true);
 
-    // tichý fallback přes proxy, když nic nenajdeme
-    if (!a.ok || a.status >= 400) {
-      const b = await fetchHtml(target, true);
-      if (b.ok) variants.unshift(b); // preferuj proxy, když direct selhal
-    } else {
-      const b = await fetchHtml(target, true);
-      if (b.ok) variants.push(b); // necháme jako zálohu
-    }
+    // zkusíme postupně víc metod na obou variantách
+    const candidates = [a, b].filter((x) => x.ok);
 
-    let result = null;
+    let best = null;
 
-    for (const v of variants) {
-      if (!v.ok) continue;
-      const $ = cheerio.load(v.text);
-      const host = new URL(target).host.replace(/^www\./, '');
+    for (const v of candidates) {
+      const html = v.text || '';
+      const $ = cheerio.load(html);
 
-      // 1) per-domain
-      if (host.endsWith('madebykristina.cz')) {
-        result = extractMadeByKristina($);
-      } else if (host.endsWith('loveandlemons.com')) {
-        result = extractLoveAndLemons($);
-      } else if (host.endsWith('ottolenghi.co.uk')) {
-        result = extractOttolenghi($);
-      } else if (host.endsWith('bbcgoodfood.com')) {
-        result = extractBBC($);
+      // A) JSON-LD (BBC Good Food hodně spolehlivý, Love&Lemons často také)
+      const ld = parseJsonLd($);
+      if (ld && (ld.ingredients?.length || ld.steps?.length)) {
+        best = {
+          title: ld.title,
+          description: ld.description,
+          image: ld.image,
+          ingredients: ld.ingredients,
+          steps: ld.steps,
+          servings: ld.servings || '',
+          time: ld.time || '',
+        };
       }
 
-      // 2) JSON-LD obecně (pro jistotu i tam, kde máme domain-specific)
-      if (!result || (!result.ingredients?.length && !result.steps?.length)) {
-        const ld = parseJsonLd($);
-        if (ld) {
-          result = {
-            ...(result || {}),
-            ...ld,
-            title: ld.title || result?.title || '',
-            description: ld.description || result?.description || '',
-            image: ld.image || result?.image || '',
-          };
-        }
-      }
-
-      // 3) plugin selektory (WPRM/Tasty/Mediavine/…)
-      if (!result || (!result.ingredients?.length && !result.steps?.length)) {
+      // B) plugin selektory (WPRM / Tasty / Mediavine / WPZOOM / itemprop)
+      if (!best || (!best.ingredients?.length && !best.steps?.length)) {
         const base = byCommonPlugins($);
         const title =
           clean($('meta[property="og:title"]').attr('content')) ||
-          clean($('title').text());
-        const description = clean($('meta[name="description"]').attr('content') || '');
+          clean($('title').text()) || best?.title || '';
+        const description =
+          clean($('meta[name="description"]').attr('content') || '') || best?.description || '';
         const image =
           $('meta[property="og:image"]').attr('content') ||
           $('meta[name="twitter:image"]').attr('content') ||
+          best?.image || '';
+        const merged = {
+          title,
+          description,
+          image,
+          ingredients: uniq([...(best?.ingredients || []), ...base.ingredients]),
+          steps: uniq([...(best?.steps || []), ...base.steps]),
+          servings: best?.servings || '',
+          time: best?.time || '',
+        };
+        if (merged.ingredients.length || merged.steps.length) best = merged;
+      }
+
+      // C) nadpisy (Ingredients/Instructions + CZ)
+      if (!best || (!best.ingredients?.length && !best.steps?.length)) {
+        const hx = fromHeadings($);
+        const title =
+          clean($('meta[property="og:title"]').attr('content')) ||
+          clean($('title').text()) || best?.title || '';
+        const description =
+          clean($('meta[name="description"]').attr('content') || '') || best?.description || '';
+        const image =
+          $('meta[property="og:image"]').attr('content') ||
+          $('meta[name="twitter:image"]').attr('content') ||
+          best?.image || '';
+        const merged = {
+          title,
+          description,
+          image,
+          ingredients: uniq([...(best?.ingredients || []), ...hx.ingredients]),
+          steps: uniq([...(best?.steps || []), ...hx.steps]),
+          servings: best?.servings || '',
+          time: best?.time || '',
+        };
+        if (merged.ingredients.length || merged.steps.length) best = merged;
+      }
+
+      // D) Readability (čistý text → regex) – záchranná síť, funguje i na madebykristina.cz
+      if (!best || (!best.ingredients?.length && !best.steps?.length)) {
+        const rb = fallbackFromReadable(html, target);
+        const title =
+          rb.title ||
+          clean($('meta[property="og:title"]').attr('content')) ||
+          clean($('title').text()) ||
+          best?.title ||
           '';
-        result = {
-          title: result?.title || title,
-          description: result?.description || description,
-          image: result?.image || image,
-          ingredients: uniq([...(result?.ingredients || []), ...base.ingredients]),
-          steps: uniq([...(result?.steps || []), ...base.steps]),
-          servings: result?.servings || '',
-          time: result?.time || '',
+        const description = rb.description || best?.description || '';
+        const image =
+          $('meta[property="og:image"]').attr('content') ||
+          $('meta[name="twitter:image"]').attr('content') ||
+          best?.image || '';
+        const merged = {
+          title,
+          description,
+          image,
+          ingredients: uniq([...(best?.ingredients || []), ...(rb.ingredients || [])]),
+          steps: uniq([...(best?.steps || []), ...(rb.steps || [])]),
+          servings: best?.servings || '',
+          time: best?.time || '',
         };
+        if (merged.ingredients.length || merged.steps.length) best = merged;
       }
 
-      // 4) fallback přes nadpisy Ingredients/Method (pro jednoduché stránky)
-      if (!result.ingredients?.length || !result.steps?.length) {
-        const collectAfter = (start) => {
-          const out = [];
-          let n = start.next();
-          while (n.length && !/^(H1|H2|H3|H4)$/i.test(n.get(0).tagName || '')) {
-            if (n.is('ul,ol')) n.find('li').each((_, li) => out.push(clean($(li).text())));
-            else if (n.is('p,div,section')) {
-              const t = clean(n.text());
-              if (t) out.push(t);
-            }
-            n = n.next();
-          }
-          return uniq(out);
-        };
-        const ingHead = $('h1,h2,h3,h4,strong,b')
-          .filter((_, el) => /ingredients?|ingredience|suroviny/i.test(clean($(el).text())))
-          .first();
-        const methHead = $('h1,h2,h3,h4,strong,b')
-          .filter((_, el) => /method|instructions?|postup|directions|kroky/i.test(clean($(el).text())))
-          .first();
-        const plusIngredients = ingHead.length ? collectAfter(ingHead) : [];
-        const plusSteps = methHead.length ? collectAfter(methHead) : [];
-        result.ingredients = uniq([...(result.ingredients || []), ...plusIngredients]);
-        result.steps = uniq([...(result.steps || []), ...plusSteps]);
-      }
-
-      if (result && (result.ingredients?.length || result.steps?.length)) break;
+      if (best && (best.ingredients?.length || best.steps?.length)) break;
     }
 
-    if (!result) {
+    if (!best) {
       return new Response(JSON.stringify({ error: 'Fetch failed' }), { status: 502 });
     }
 
-    // meta doplnění
-    if (!result.title)
-      result.title = 'Recept';
-    if (!result.description)
-      result.description = '';
-    if (!result.image)
-      result.image = '';
+    // doplň meta
+    if (!best.title) best.title = 'Recept';
+    if (!best.description) best.description = '';
+    if (!best.image) best.image = '';
 
     const out = {
       id: crypto.randomUUID(),
-      title: clean(result.title),
-      description: clean(result.description),
-      image: clean(result.image),
-      ingredients: uniq(result.ingredients || []),
-      steps: uniq(result.steps || []),
-      servings: clean(result.servings || ''),
-      time: clean(result.time || ''),
-      tags: autoTags(result),
+      title: clean(best.title),
+      description: clean(best.description),
+      image: clean(best.image),
+      ingredients: uniq(best.ingredients || []),
+      steps: uniq(best.steps || []),
+      servings: clean(best.servings || ''),
+      time: clean(best.time || ''),
+      tags: autoTags(best),
       source: target,
     };
 
