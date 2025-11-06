@@ -3,9 +3,10 @@ export const dynamic = 'force-dynamic';
 
 import * as cheerio from 'cheerio';
 
+/* ---------- robust fetch ---------- */
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36';
-const HEADERS = {
+const COMMON_HEADERS = {
   'user-agent': UA,
   accept:
     'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
@@ -23,11 +24,9 @@ const clean = (t) =>
 
 const j = (s) => { try { return JSON.parse(s); } catch { return null; } };
 const listify = (v) =>
-  Array.isArray(v)
-    ? v.map((x) => clean(String(x))).filter(Boolean)
-    : typeof v === 'string'
-    ? [clean(v)]
-    : [];
+  Array.isArray(v) ? v.map((x) => clean(String(x))).filter(Boolean)
+  : typeof v === 'string' ? [clean(v)]
+  : [];
 
 const firstNonEmpty = (...arrs) => {
   for (const a of arrs) if (Array.isArray(a) && a.length) return a;
@@ -35,23 +34,36 @@ const firstNonEmpty = (...arrs) => {
 };
 
 async function fetchHtml(url) {
-  const res = await fetch(url, { headers: HEADERS, redirect: 'follow', cache: 'no-store' });
-  if (!res.ok) throw new Error('Fetch failed: ' + res.status);
-  const html = await res.text();
-  return { html, $, $: cheerio.load(html) };
+  const headers = {
+    ...COMMON_HEADERS,
+    referer: new URL(url).origin + '/',
+  };
+  const res = await fetch(url, { headers, redirect: 'follow', cache: 'no-store' });
+  const text = await res.text().catch(() => '');
+  if (!res.ok) {
+    const msg = text?.slice(0, 300) || res.statusText || 'Unknown';
+    throw new Error(`Fetch ${res.status}: ${msg}`);
+  }
+  return cheerio.load(text);
 }
 
-/* ---------------- JSON-LD ---------------- */
-function okRecipeType(v) {
+/* ---------- JSON-LD ---------- */
+const isRecipeType = (v) => {
   if (!v) return false;
   if (Array.isArray(v)) return v.some((x) => String(x).toLowerCase() === 'recipe');
   return String(v).toLowerCase() === 'recipe';
-}
+};
 function pickRecipe(node) {
   if (!node) return null;
-  if (okRecipeType(node['@type'])) return node;
-  if (Array.isArray(node)) { for (const n of node) { const r = pickRecipe(n); if (r) return r; } return null; }
-  for (const k of ['mainEntity', '@graph', 'graph', 'itemListElement']) { const r = pickRecipe(node[k]); if (r) return r; }
+  if (isRecipeType(node['@type'])) return node;
+  if (Array.isArray(node)) {
+    for (const n of node) { const r = pickRecipe(n); if (r) return r; }
+    return null;
+  }
+  for (const k of ['mainEntity', '@graph', 'graph', 'itemListElement']) {
+    const r = pickRecipe(node[k]);
+    if (r) return r;
+  }
   return null;
 }
 function parseLdSteps(v) {
@@ -74,6 +86,7 @@ function parseJsonLd($) {
     .map((_, el) => $(el).contents().text())
     .get()
     .filter(Boolean);
+
   let cand = null;
   for (const raw of scripts) {
     const chunks = raw
@@ -99,26 +112,21 @@ function parseJsonLd($) {
   };
 }
 
-/* ---------------- Plugin selektory ---------------- */
-function tastyIngredients($) {
-  return $(
-    '.tasty-recipes .tasty-recipes-ingredients li,.tasty-recipes-ingredients li,.tasty-recipe-ingredients li'
-  ).map((_, el) => clean($(el).text())).get().filter(Boolean);
-}
-function tastySteps($) {
-  const li = $(
-    '.tasty-recipes .tasty-recipes-instructions li,.tasty-recipes-instructions li,.tasty-recipe-instructions li'
-  ).map((_, el) => clean($(el).text())).get().filter(Boolean);
+/* ---------- pluginy ---------- */
+// Tasty
+const tastyIngredients = ($) =>
+  $('.tasty-recipes .tasty-recipes-ingredients li,.tasty-recipes-ingredients li,.tasty-recipe-ingredients li')
+    .map((_, el) => clean($(el).text())).get().filter(Boolean);
+const tastySteps = ($) => {
+  const li = $('.tasty-recipes .tasty-recipes-instructions li,.tasty-recipes-instructions li,.tasty-recipe-instructions li')
+    .map((_, el) => clean($(el).text())).get().filter(Boolean);
   if (li.length) return li;
-  const p = $(
-    '.tasty-recipes .tasty-recipes-instructions p,.tasty-recipes-instructions p'
-  ).map((_, el) => clean($(el).text())).get().filter(Boolean);
-  return p;
-}
+  return $('.tasty-recipes .tasty-recipes-instructions p,.tasty-recipes-instructions p')
+    .map((_, el) => clean($(el).text())).get().filter(Boolean);
+};
+// WPRM
 function wprmIngredients($) {
-  const rows = $(
-    '.wprm-recipe-ingredients-container .wprm-recipe-ingredient, .wprm-recipe-ingredients .wprm-recipe-ingredient'
-  );
+  const rows = $('.wprm-recipe-ingredients-container .wprm-recipe-ingredient, .wprm-recipe-ingredients .wprm-recipe-ingredient');
   if (rows.length) {
     const items = rows.map((_, el) => {
       const $el = $(el);
@@ -133,69 +141,63 @@ function wprmIngredients($) {
     }).get().filter(Boolean);
     if (items.length) return items;
   }
-  const simple = $('.wprm-recipe-ingredients-container li, .wprm-recipe-ingredients li')
+  return $('.wprm-recipe-ingredients-container li, .wprm-recipe-ingredients li')
     .map((_, el) => clean($(el).text())).get().filter(Boolean);
-  return simple;
 }
 function wprmSteps($) {
-  const steps = $(
-    '.wprm-recipe-instructions-container .wprm-recipe-instruction, .wprm-recipe-instruction'
-  ).map((_, el) => clean($(el).find('.wprm-recipe-instruction-text').text() || $(el).text()))
+  const steps = $('.wprm-recipe-instructions-container .wprm-recipe-instruction, .wprm-recipe-instruction')
+    .map((_, el) => clean($(el).find('.wprm-recipe-instruction-text').text() || $(el).text()))
     .get().filter(Boolean);
   if (steps.length) return steps;
-  const simple = $('.wprm-recipe-instructions-container li, .wprm-recipe-instructions li')
-    .map((_, el) => clean($(el).text())).get().filter(Boolean);
-  return simple;
-}
-function mvIngredients($) {
-  return $('.mv-create-ingredients li, .mv-create-ingredients .mv-create-list-item')
+  return $('.wprm-recipe-instructions-container li, .wprm-recipe-instructions li')
     .map((_, el) => clean($(el).text())).get().filter(Boolean);
 }
-function mvSteps($) {
-  return $('.mv-create-instructions li, .mv-create-instructions .mv-create-list-item')
+// Mediavine
+const mvIngredients = ($) =>
+  $('.mv-create-ingredients li, .mv-create-ingredients .mv-create-list-item')
     .map((_, el) => clean($(el).text())).get().filter(Boolean);
-}
-function wpzoomIngredients($) {
-  return $(
-    '.wpzoom-recipe-card .ingredients-list li,.wp-block-wpzoom-recipe-card-block-recipe-card .ingredients-list li'
-  ).map((_, el) => clean($(el).text())).get().filter(Boolean);
-}
-function wpzoomSteps($) {
-  return $(
-    '.wpzoom-recipe-card .directions-list li,.wp-block-wpzoom-recipe-card-block-recipe-card .directions-list li'
-  ).map((_, el) => clean($(el).text())).get().filter(Boolean);
-}
-function easyIngredients($) {
-  return $('.ERIngredients li, .easyrecipe .ingredients li, .yumprint-recipe-ingredients li')
+const mvSteps = ($) =>
+  $('.mv-create-instructions li, .mv-create-instructions .mv-create-list-item')
     .map((_, el) => clean($(el).text())).get().filter(Boolean);
-}
-function easySteps($) {
-  return $('.ERInstructions li, .easyrecipe .instructions li, .yumprint-recipe-directions li')
+// WPZOOM
+const wpzIngredients = ($) =>
+  $('.wpzoom-recipe-card .ingredients-list li,.wp-block-wpzoom-recipe-card-block-recipe-card .ingredients-list li')
     .map((_, el) => clean($(el).text())).get().filter(Boolean);
-}
+const wpzSteps = ($) =>
+  $('.wpzoom-recipe-card .directions-list li,.wp-block-wpzoom-recipe-card-block-recipe-card .directions-list li')
+    .map((_, el) => clean($(el).text())).get().filter(Boolean);
+// EasyRecipe / Yumprint
+const easyIngredients = ($) =>
+  $('.ERIngredients li, .easyrecipe .ingredients li, .yumprint-recipe-ingredients li')
+    .map((_, el) => clean($(el).text())).get().filter(Boolean);
+const easySteps = ($) =>
+  $('.ERInstructions li, .easyrecipe .instructions li, .yumprint-recipe-directions li')
+    .map((_, el) => clean($(el).text())).get().filter(Boolean);
 
-/* ---------------- Heading-based ---------------- */
+/* ---------- heading-based ---------- */
 function collectAfterHeading($, headEl) {
   const outBlocks = [];
   let $n = $(headEl).next();
   while ($n && $n.length) {
     if ($n.is('h1,h2,h3,h4,strong,b')) break;
+
     if ($n.is('ul,ol')) {
       const items = $n.find('li').map((_, li) => clean($(li).text())).get().filter(Boolean);
       if (items.length) outBlocks.push(items);
     }
     if ($n.is('table')) {
       const rows = $n.find('tr').map((_, tr) => {
-        const cells = $(tr).find('th,td').map((__, td) => clean($(td).text())).get().filter(Boolean);
+        const cells = $(tr).find('th,td').map((__, td) => clean($(td).text())) .get().filter(Boolean);
         return clean(cells.join(' '));
       }).get().filter(Boolean);
       if (rows.length) outBlocks.push(rows);
     }
-    if ($n.is('p,div')) {
-      const clone = $n.clone(); clone.find('br').replaceWith('\n');
-      const lines = clean(clone.text()).split('\n').map((s) => clean(s)).filter(Boolean);
+    if ($n.is('p,div,section,article')) {
+      const c = $n.clone(); c.find('br').replaceWith('\n');
+      const lines = clean(c.text()).split('\n').map(clean).filter(Boolean);
       if (lines.length >= 2) outBlocks.push(lines);
     }
+
     $n = $n.next();
   }
   const flat = outBlocks.flat().map(clean).filter(Boolean);
@@ -204,14 +206,14 @@ function collectAfterHeading($, headEl) {
   return uniq;
 }
 function headingIngredients($) {
-  let nodes = $('h1,h2,h3,h4,strong,b').filter((_, el) => {
-    const t = clean($(el).text()).toLowerCase();
-    return /(ingredients|ingredience|suroviny)/i.test(t);
-  });
+  let nodes = $('h1,h2,h3,h4,strong,b').filter((_, el) =>
+    /(ingredients|ingredience|suroviny)/i.test(clean($(el).text()))
+  );
   if (nodes.length) {
     const all = []; nodes.each((_, el) => { all.push(...collectAfterHeading($, el)); });
     if (all.length) return all;
   }
+  // Ottolenghi – sekce LABNEH / TO SERVE apod.
   const stopRe = /(method|instructions|postup|directions|kroky)/i;
   const subs = $('h2,h3,h4,strong,b').filter((_, el) => {
     const t = clean($(el).text()).toLowerCase();
@@ -224,10 +226,9 @@ function headingIngredients($) {
   return [];
 }
 function headingSteps($) {
-  const method = $('h1,h2,h3,h4,strong,b').filter((_, el) => {
-    const t = clean($(el).text()).toLowerCase();
-    return /(method|instructions|postup|directions|kroky)/i.test(t);
-  });
+  const method = $('h1,h2,h3,h4,strong,b').filter((_, el) =>
+    /(method|instructions|postup|directions|kroky)/i.test(clean($(el).text()))
+  );
   if (method.length) {
     const items = collectAfterHeading($, method.get(0));
     if (items.length) return items;
@@ -240,139 +241,120 @@ function headingSteps($) {
   return [];
 }
 
-/* ---------------- Text fallback (nové) ---------------- */
+/* ---------- text fallback ---------- */
 function textFallback($) {
-  // z body vytvoř „text s řádky“ – <li>, <br>, <p>, <tr> => nové řádky
   const $body = $('body').clone();
-
-  // semantičtější rozbití na řádky
-  $body.find('li').prepend('\n').append('\n');
-  $body.find('tr').prepend('\n').append('\n');
+  $body.find('li,tr').prepend('\n').append('\n');
   $body.find('p,div,section,article').append('\n');
   $body.find('br').replaceWith('\n');
 
-  const text = clean($body.text()).replace(/\n{2,}/g, '\n');
+  const raw = clean($body.text()).replace(/\n{2,}/g, '\n');
+  const lower = raw.toLowerCase();
 
-  const lower = text.toLowerCase();
-
-  const findIndex = (labels, from = 0) => {
+  const findIdx = (labels, from = 0) => {
     let idx = -1;
     for (const l of labels) {
       const i = lower.indexOf(l, from);
-      if (i !== -1) { idx = idx === -1 ? i : Math.min(idx, i); }
+      if (i !== -1) idx = idx === -1 ? i : Math.min(idx, i);
     }
     return idx;
   };
 
-  const ING = ['\ningredients\n', '\ningredience\n', '\nsuroviny\n', 'ingredients\n', 'ingredience\n', 'suroviny\n'];
-  const STEPS = ['\nmethod\n', '\ninstructions\n', '\npostup\n', '\ndirections\n', 'method\n', 'instructions\n', 'postup\n', 'directions\n'];
+  const ING = ['\ningredients\n','\ningredience\n','\nsuroviny\n','ingredients\n','ingredience\n','suroviny\n'];
+  const STEPS = ['\nmethod\n','\ninstructions\n','\npostup\n','\ndirections\n','method\n','instructions\n','postup\n','directions\n'];
 
-  const iStart = findIndex(ING);
+  const iStart = findIdx(ING);
   if (iStart === -1) return { ingredients: [], steps: [] };
+  const sStart = findIdx(STEPS, iStart + 1);
 
-  const sStart = findIndex(STEPS, iStart + 1);
+  const toLines = (txt) =>
+    txt.split('\n').map(clean).filter((x) =>
+      x &&
+      !/^(ingredients|ingredience|suroviny|method|instructions|postup|directions)$/i.test(x)
+    );
 
-  const ingBlock = sStart !== -1 ? text.slice(iStart, sStart) : text.slice(iStart);
-  const stepsBlock = sStart !== -1 ? text.slice(sStart) : '';
+  let ingredients = toLines(sStart !== -1 ? raw.slice(iStart, sStart) : raw.slice(iStart));
+  let steps = toLines(sStart !== -1 ? raw.slice(sStart) : '');
 
-  const toLines = (blk) =>
-    blk.split('\n')
-      .map((x) => clean(x))
-      .filter((x) =>
-        x &&
-        !/^ingredients$/i.test(x) &&
-        !/^ingredience$/i.test(x) &&
-        !/^suroviny$/i.test(x) &&
-        !/^method$/i.test(x) &&
-        !/^instructions$/i.test(x) &&
-        !/^postup$/i.test(x) &&
-        !/^directions$/i.test(x)
-      );
+  // heuristika: sekční nadpisy bez jednotek vyházej, pokud je seznam dost dlouhý
+  const looksLikeHeader = (ln) =>
+    !/[0-9]/.test(ln) && !/(tsp|tbsp|g|kg|ml|l|cup|cups|oz|ounce|teaspoon|tablespoon)/i.test(ln);
+  if (ingredients.length > 6) ingredients = ingredients.filter((ln) => !looksLikeHeader(ln));
 
-  let ingredients = toLines(ingBlock);
-  // Heuristika: vyhoď „sekční“ řádky typu "LABNEH", "TO SERVE" jen pokud po nich není číslo/jednotka
-  ingredients = ingredients.filter((ln) => {
-    if (!/[0-9]/.test(ln) && !/(tsp|tbsp|g|kg|ml|l|cup|cups|ounce|oz|teaspoon|tablespoon)/i.test(ln)) {
-      // ponech sekční headery jen pokud by seznam bez nich byl prázdný
-      return ingredients.length < 4;
-    }
-    return true;
-  });
-
-  let steps = toLines(stepsBlock);
-  // kroky: preferuj věty s tečkami / číslované
-  if (steps.length) {
-    const dense = steps.join(' ');
-    if (steps.length < 3 && dense.includes('. ')) {
-      steps = dense.split(/(?<=\.)\s+/).map(clean).filter(Boolean);
-    }
+  if (steps.length < 3 && steps.join(' ').includes('. ')) {
+    steps = steps.join(' ').split(/(?<=\.)\s+/).map(clean).filter(Boolean);
   }
 
   return { ingredients, steps };
 }
 
-/* ---------------- Generic fallback ---------------- */
-function genericIngredients($) {
+/* ---------- generic ---------- */
+const genericIngredients = ($) => {
   const s1 = $('[itemprop="recipeIngredient"], [itemprop="ingredients"]')
     .map((_, el) => clean($(el).text())).get().filter(Boolean);
   if (s1.length) return s1;
-  for (const sel of ['.ingredients', '.ingredient-list', '.recipe-ingredients', '#ingredients']) {
-    const items = $(sel).first();
-    if (items && items.length) {
-      const list = items.find('li').map((_, el) => clean($(el).text())).get().filter(Boolean);
+  for (const sel of ['.ingredients','.ingredient-list','.recipe-ingredients','#ingredients']) {
+    const box = $(sel).first();
+    if (box?.length) {
+      const list = box.find('li').map((_, el) => clean($(el).text())).get().filter(Boolean);
       if (list.length) return list;
     }
   }
   return headingIngredients($);
-}
-function genericSteps($) {
+};
+const genericSteps = ($) => {
   const holder = $('[itemprop="recipeInstructions"]').first();
-  if (holder && holder.length) {
+  if (holder?.length) {
     const li = holder.find('li'); if (li.length) return li.map((_, el) => clean($(el).text())).get().filter(Boolean);
     const p = holder.find('p'); if (p.length) return p.map((_, el) => clean($(el).text())).get().filter(Boolean);
     const txt = clean(holder.text());
     if (txt.includes('\n')) return txt.split('\n').map(clean).filter(Boolean);
     if (txt) return [txt];
   }
-  for (const sel of ['.instructions', '.instruction-list', '.recipe-instructions', '#instructions']) {
-    const items = $(sel).first();
-    if (items && items.length) {
-      const li = items.find('li'); if (li.length) return li.map((_, el) => clean($(el).text())).get().filter(Boolean);
-      const p = items.find('p'); if (p.length) return p.map((_, el) => clean($(el).text())).get().filter(Boolean);
+  for (const sel of ['.instructions','.instruction-list','.recipe-instructions','#instructions']) {
+    const box = $(sel).first();
+    if (box?.length) {
+      const li = box.find('li'); if (li.length) return li.map((_, el) => clean($(el).text())).get().filter(Boolean);
+      const p = box.find('p'); if (p.length) return p.map((_, el) => clean($(el).text())).get().filter(Boolean);
     }
   }
   return headingSteps($);
-}
+};
 
-/* ---------------- Handler ---------------- */
+/* ---------- handler ---------- */
 export async function GET(req) {
   const u = new URL(req.url);
   const target = u.searchParams.get('url');
-  if (!target) return new Response(JSON.stringify({ error: 'Missing url' }), { status: 400 });
+  if (!target) {
+    return new Response(JSON.stringify({
+      error: 'Missing url',
+      hint: '/api/import?url=https://pinchofyum.com/instant-pot-spicy-short-rib-noodle-soup'
+    }), { status: 400 });
+  }
 
   try {
-    let { $, html } = await fetchHtml(target);
+    const $ = await fetchHtml(target);
 
     // 1) JSON-LD
     let meta = parseJsonLd($);
 
-    // 2) Pluginy (PRVNÍ NEPRÁZDNÉ)
+    // 2) pluginy (první NEprázdné)
     let ingredients = firstNonEmpty(
       tastyIngredients($),
       wprmIngredients($),
       mvIngredients($),
-      wpzoomIngredients($),
+      wpzIngredients($),
       easyIngredients($)
     );
     let steps = firstNonEmpty(
       tastySteps($),
       wprmSteps($),
       mvSteps($),
-      wpzoomSteps($),
+      wpzSteps($),
       easySteps($)
     );
 
-    // 3) Generic / heading-based
+    // 3) generic / heading
     if (!ingredients.length) ingredients = genericIngredients($);
     if (!steps.length) steps = genericSteps($);
 
@@ -380,16 +362,14 @@ export async function GET(req) {
     if ((!ingredients.length || !steps.length) && !/\/amp\/?$/.test(target)) {
       try {
         const ampUrl = target.replace(/\/$/, '') + '/amp/';
-        const amp = await fetchHtml(ampUrl);
-        const $amp = amp.$;
-
+        const $amp = await fetchHtml(ampUrl);
         if (!meta) meta = parseJsonLd($amp);
         if (!ingredients.length) ingredients = genericIngredients($amp);
         if (!steps.length) steps = genericSteps($amp);
       } catch { /* ignore */ }
     }
 
-    // 5) TEXT fallback (naprosto obecný – řeší Ottolenghi / Pinch of Yum / L&L)
+    // 5) text fallback
     if (!ingredients.length || !steps.length) {
       const tf = textFallback($);
       if (!ingredients.length) ingredients = tf.ingredients || [];
@@ -401,9 +381,12 @@ export async function GET(req) {
       clean($('meta[property="og:title"]').attr('content') || $('title').text()) ||
       'Recept';
     const description =
-      clean(meta?.description) || clean($('meta[name="description"]').attr('content')) || '';
+      clean(meta?.description) ||
+      clean($('meta[name="description"]').attr('content')) ||
+      '';
     const image =
-      clean(meta?.image) || clean($('meta[property="og:image"]').attr('content') || '');
+      clean(meta?.image) ||
+      clean($('meta[property="og:image"]').attr('content') || '');
 
     return new Response(
       JSON.stringify({
@@ -419,6 +402,9 @@ export async function GET(req) {
       { headers: { 'content-type': 'application/json' } }
     );
   } catch (e) {
-    return new Response(JSON.stringify({ error: String(e) }), { status: 500 });
+    return new Response(JSON.stringify({
+      error: 'Importer failed',
+      detail: String(e)
+    }), { status: 500, headers: { 'content-type': 'application/json' } });
   }
 }
