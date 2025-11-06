@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic';
 
 import * as cheerio from 'cheerio';
 
+/* ------------ fetch like a browser ------------ */
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36';
 const HEADERS = {
@@ -13,11 +14,12 @@ const HEADERS = {
   'upgrade-insecure-requests': '1',
 };
 
-const clean = (t) => (t || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+const clean = (t) => (t || '').replace(/\u00a0/g, ' ').replace(/[ \t]+/g, ' ').replace(/\s*\n\s*/g, '\n').trim();
 const j = (s) => { try { return JSON.parse(s); } catch { return null; } };
 const listify = (v) => Array.isArray(v) ? v.map(x=>clean(String(x))).filter(Boolean)
   : (typeof v === 'string' ? [clean(v)] : []);
 
+/* ------------ helpers ------------ */
 function okRecipeType(v){ if(!v) return false; if(Array.isArray(v)) return v.some(x=>String(x).toLowerCase()==='recipe'); return String(v).toLowerCase()==='recipe'; }
 function pickRecipe(node){
   if(!node) return null;
@@ -40,44 +42,6 @@ function parseLdSteps(v){
   walk(v);
   return out;
 }
-function textListFrom($, root){
-  if(!root || root.length===0) return [];
-  const li = root.find('li');
-  if(li.length) return li.map((_,el)=>clean($(el).text())).get().filter(Boolean);
-  const p = root.find('p');
-  if(p.length) return p.map((_,el)=>clean($(el).text())).get().filter(Boolean);
-  const txt = clean(root.text());
-  if(!txt) return [];
-  if(txt.includes('\n')) return txt.split('\n').map(clean).filter(Boolean);
-  return [txt];
-}
-
-// Najdi UL/OL podle nejbližšího předcházejícího nadpisu s daným regexem
-function listByNearestHeading($, re){
-  // projdi všechny UL/OL a podívej se na předchozí sourozence a rodiče, zda obsahují nadpis
-  const candidates = [];
-  $('ul,ol').each((_, el)=>{
-    const $el=$(el);
-    // nejbližší předcházející nadpis v rámci stejného rodiče
-    let prev = $el.prevAll('h2,h3,h4,strong,b').first();
-    if(!prev.length){
-      // zkus rodiče a jeho předchozí sourozence
-      const parent = $el.parent();
-      if(parent && parent.length){
-        prev = parent.prevAll('h2,h3,h4,strong,b').first();
-      }
-    }
-    if(prev && prev.length){
-      const head = clean(prev.text()).toLowerCase();
-      if(re.test(head)){
-        const items = $el.find('li').map((_,li)=>clean($(li).text())).get().filter(Boolean);
-        if(items.length) candidates.push(items);
-      }
-    }
-  });
-  return candidates[0] || [];
-}
-
 async function fetchHtml(url){
   const res = await fetch(url, { headers: HEADERS, redirect: 'follow', cache: 'no-store' });
   if(!res.ok) throw new Error('Fetch failed: '+res.status);
@@ -85,13 +49,12 @@ async function fetchHtml(url){
   return { $, html, url, $: cheerio.load(html) };
 }
 
-/* --------- JSON-LD --------- */
+/* ------------ JSON-LD ------------ */
 function parseJsonLd($){
   const scripts = $('script[type="application/ld+json"]').map((_,el)=>$(el).contents().text()).get().filter(Boolean);
   let cand=null;
   for(const raw of scripts){
-    const chunks = raw
-      .replace(/<\/?script[^>]*>/gi,'')
+    const chunks = raw.replace(/<\/?script[^>]*>/gi,'')
       .split(/(?<=\})\s*(?=\{)|\n(?=\s*\{)/).map(s=>s.trim()).filter(Boolean);
     for(const ch of chunks){
       const data = j(ch);
@@ -111,8 +74,7 @@ function parseJsonLd($){
   };
 }
 
-/* --------- Parséry pro různé pluginy --------- */
-// Tasty Recipes (Pinch of Yum)
+/* ------------ known plugins (Tasty/WPRM/etc.) ------------ */
 function tastyIngredients($){
   return $(
     '.tasty-recipes .tasty-recipes-ingredients li,'+
@@ -133,36 +95,6 @@ function tastySteps($){
   ).map((_,el)=>clean($(el).text())).get().filter(Boolean);
   return p;
 }
-
-// Mediavine Create
-function mvIngredients($){
-  return $(
-    '.mv-create-ingredients li,'+
-    '.mv-create-ingredients .mv-create-list-item'
-  ).map((_,el)=>clean($(el).text())).get().filter(Boolean);
-}
-function mvSteps($){
-  return $(
-    '.mv-create-instructions li,'+
-    '.mv-create-instructions .mv-create-list-item'
-  ).map((_,el)=>clean($(el).text())).get().filter(Boolean);
-}
-
-// WPZOOM Recipe Card
-function wpzoomIngredients($){
-  return $(
-    '.wpzoom-recipe-card .ingredients-list li,'+
-    '.wp-block-wpzoom-recipe-card-block-recipe-card .ingredients-list li'
-  ).map((_,el)=>clean($(el).text())).get().filter(Boolean);
-}
-function wpzoomSteps($){
-  return $(
-    '.wpzoom-recipe-card .directions-list li,'+
-    '.wp-block-wpzoom-recipe-card-block-recipe-card .directions-list li'
-  ).map((_,el)=>clean($(el).text())).get().filter(Boolean);
-}
-
-// WPRM (rezerva)
 function wprmIngredients($){
   const rows = $('.wprm-recipe-ingredients-container .wprm-recipe-ingredient, .wprm-recipe-ingredients .wprm-recipe-ingredient');
   if(rows.length){
@@ -188,8 +120,30 @@ function wprmSteps($){
   const simple = $('.wprm-recipe-instructions-container li, .wprm-recipe-instructions li').map((_,el)=>clean($(el).text())).get().filter(Boolean);
   return simple;
 }
-
-// EasyRecipe / Yumprint (starší blogy)
+function mvIngredients($){
+  return $(
+    '.mv-create-ingredients li,'+
+    '.mv-create-ingredients .mv-create-list-item'
+  ).map((_,el)=>clean($(el).text())).get().filter(Boolean);
+}
+function mvSteps($){
+  return $(
+    '.mv-create-instructions li,'+
+    '.mv-create-instructions .mv-create-list-item'
+  ).map((_,el)=>clean($(el).text())).get().filter(Boolean);
+}
+function wpzoomIngredients($){
+  return $(
+    '.wpzoom-recipe-card .ingredients-list li,'+
+    '.wp-block-wpzoom-recipe-card-block-recipe-card .ingredients-list li'
+  ).map((_,el)=>clean($(el).text())).get().filter(Boolean);
+}
+function wpzoomSteps($){
+  return $(
+    '.wpzoom-recipe-card .directions-list li,'+
+    '.wp-block-wpzoom-recipe-card-block-recipe-card .directions-list li'
+  ).map((_,el)=>clean($(el).text())).get().filter(Boolean);
+}
 function easyIngredients($){
   return $('.ERIngredients li, .easyrecipe .ingredients li, .yumprint-recipe-ingredients li')
     .map((_,el)=>clean($(el).text())).get().filter(Boolean);
@@ -199,17 +153,120 @@ function easySteps($){
     .map((_,el)=>clean($(el).text())).get().filter(Boolean);
 }
 
-/* --------- Generic fallback --------- */
+/* ------------ generic/heading-based (NOVÉ – funguje na Ottolenghi) ------------ */
+
+// vyber obsah (UL/OL/TABLE/P/DIV) mezi tímto nadpisem a dalším nadpisem
+function collectAfterHeading($, headEl){
+  const outBlocks = [];
+
+  // sbírej sourozence a jejich potomky, dokud nenarazíš na další heading
+  let $n = $(headEl).next();
+  while ($n && $n.length) {
+    if ($n.is('h1,h2,h3,h4,strong,b')) break;
+
+    // <ul>/<ol>
+    if ($n.is('ul,ol')) {
+      const items = $n.find('li').map((_, li)=>clean($(li).text())).get().filter(Boolean);
+      if (items.length) outBlocks.push(items);
+    }
+
+    // <table> – spoj buňky řádku do jedné věty
+    if ($n.is('table')) {
+      const rows = $n.find('tr').map((_, tr)=>{
+        const cells = $(tr).find('th,td').map((__, td)=>clean($(td).text())).get().filter(Boolean);
+        return clean(cells.join(' '));
+      }).get().filter(Boolean);
+      if (rows.length) outBlocks.push(rows);
+    }
+
+    // <p> / <div> – rozdělení přes <br> / nové řádky
+    if ($n.is('p,div')) {
+      // nahradíme <br> za \n a rozsekáme
+      const clone = $n.clone();
+      clone.find('br').replaceWith('\n');
+      const lines = clean(clone.text()).split('\n').map(clean).filter(Boolean);
+      // hezký heuristický split – pokud to vypadá jako víc ingrediencí v jednom řádku, necháme jako více řádků
+      if (lines.length >= 2) outBlocks.push(lines);
+    }
+
+    $n = $n.next();
+  }
+
+  // zplošť a vrať jako unikatní list (zachovej pořadí)
+  const flat = outBlocks.flat().map(clean).filter(Boolean);
+  const seen = new Set(); const uniq=[]; for (const x of flat){ if(!seen.has(x)){ seen.add(x); uniq.push(x); } }
+  return uniq;
+}
+
+function headingIngredients($){
+  // hledejte „Ingredients / Ingredience / Suroviny“ – i sekce/varianty (LABNEH, CONFIT TOMATOES…)
+  // nejdřív klasický nadpis
+  let nodes = $('h1,h2,h3,h4,strong,b').filter((_,el)=>{
+    const t = clean($(el).text()).toLowerCase();
+    return /(ingredients|ingredience|suroviny)/i.test(t);
+  });
+  if (nodes.length) {
+    const all = [];
+    nodes.each((_, el) => { all.push(...collectAfterHeading($, el)); });
+    if (all.length) return all;
+  }
+
+  // Ottolenghi styl – sekce bez klíčového slova, ale několik podnadpisů (LABNEH / CONFIT TOMATOES / TO SERVE)
+  // Bereme první podnadpis a nasledující tabulky/ul/odstavce, dokud nenarazíme na „Method|Instructions“
+  const stopRe = /(method|instructions|postup|directions|kroky)/i;
+  const subs = $('h2,h3,h4,strong,b').filter((_,el)=>{
+    const t = clean($(el).text()).toLowerCase();
+    return t && !stopRe.test(t) && t.length <= 40; // podnadpisy typu "LABNEH", "CONFIT TOMATOES"
+  });
+
+  if (subs.length) {
+    const out = [];
+    subs.each((_, el) => {
+      const block = collectAfterHeading($, el);
+      if (block.length) out.push(...block);
+    });
+    if (out.length) return out;
+  }
+
+  return [];
+}
+
+function headingSteps($){
+  // normální „Method / Instructions / Postup“
+  const method = $('h1,h2,h3,h4,strong,b').filter((_,el)=>{
+    const t = clean($(el).text()).toLowerCase();
+    return /(method|instructions|postup|directions|kroky)/i.test(t);
+  });
+  if (method.length) {
+    // vezmi první relevantní
+    const items = collectAfterHeading($, method.get(0));
+    if (items.length) return items;
+  }
+
+  // fallback: když jsme nasbírali ingredience přes podnadpisy, kroky mohou být hned po nich
+  // – najdi první UL/OL/P po posledním nadpisu a vezmi jeho řádky
+  const lastHead = $('h1,h2,h3,h4,strong,b').last();
+  if (lastHead && lastHead.length) {
+    const maybe = collectAfterHeading($, lastHead);
+    if (maybe.length) return maybe;
+  }
+
+  return [];
+}
+
+/* ------------ generic fallback ------------ */
 function genericIngredients($){
   const s1 = $('[itemprop="recipeIngredient"], [itemprop="ingredients"]').map((_,el)=>clean($(el).text())).get().filter(Boolean);
   if(s1.length) return s1;
   for(const sel of ['.ingredients','.ingredient-list','.recipe-ingredients','#ingredients']){
-    const items = textListFrom($,$(sel).first());
-    if(items.length) return items;
+    const items = $(sel).first();
+    if(items && items.length){
+      const list = items.find('li').map((_,el)=>clean($(el).text())).get().filter(Boolean);
+      if(list.length) return list;
+    }
   }
-  const byHead = listByNearestHeading($, /(ingredients|ingredience|suroviny)/i);
-  if(byHead.length) return byHead;
-  return [];
+  // poslední záchrana – podle nadpisů
+  return headingIngredients($);
 }
 function genericSteps($){
   const holder = $('[itemprop="recipeInstructions"]').first();
@@ -221,45 +278,46 @@ function genericSteps($){
     if(txt) return [txt];
   }
   for(const sel of ['.instructions','.instruction-list','.recipe-instructions','#instructions']){
-    const items = textListFrom($,$(sel).first());
-    if(items.length) return items;
+    const items = $(sel).first();
+    if(items && items.length){
+      const li = items.find('li'); if(li.length) return li.map((_,el)=>clean($(el).text())).get().filter(Boolean);
+      const p  = items.find('p');  if(p.length)  return p.map((_,el)=>clean($(el).text())).get().filter(Boolean);
+    }
   }
-  const byHead = listByNearestHeading($, /(instructions|postup|method|directions|kroky)/i);
-  if(byHead.length) return byHead;
-  return [];
+  return headingSteps($);
 }
 
-/* --------- handler --------- */
+/* ------------ handler ------------ */
 export async function GET(req){
   const u = new URL(req.url);
   const target = u.searchParams.get('url');
   if(!target) return new Response(JSON.stringify({error:'Missing url'}),{status:400});
 
   try{
-    // originál
     let { $ } = await fetchHtml(target);
 
-    // JSON-LD
+    // 1) JSON-LD
     let meta = parseJsonLd($);
 
-    // Pluginy – Tasty → Mediavine → WPZOOM → WPRM → Easy/Yumprint
+    // 2) Pluginy
     let ingredients =
       tastyIngredients($) ||
+      wprmIngredients($) ||
       mvIngredients($) ||
       wpzoomIngredients($) ||
-      wprmIngredients($) ||
       easyIngredients($);
     let steps =
       tastySteps($) ||
+      wprmSteps($) ||
       mvSteps($) ||
       wpzoomSteps($) ||
-      wprmSteps($) ||
       easySteps($);
 
-    if(!ingredients.length) ingredients = genericIngredients($);
-    if(!steps.length)       steps       = genericSteps($);
+    // 3) Generic / heading-based (NOVÉ)
+    if(!ingredients?.length) ingredients = genericIngredients($);
+    if(!steps?.length)       steps       = genericSteps($);
 
-    // AMP pokus
+    // 4) AMP (poslední pokus)
     if((!ingredients.length || !steps.length) && !/\/amp\/?$/.test(target)){
       try{
         const ampUrl = target.replace(/\/$/, '') + '/amp/';
@@ -267,25 +325,8 @@ export async function GET(req){
         const $amp = amp.$;
 
         if(!meta) meta = parseJsonLd($amp);
-
-        if(!ingredients.length){
-          ingredients =
-            tastyIngredients($amp) ||
-            mvIngredients($amp) ||
-            wpzoomIngredients($amp) ||
-            wprmIngredients($amp) ||
-            easyIngredients($amp) ||
-            genericIngredients($amp);
-        }
-        if(!steps.length){
-          steps =
-            tastySteps($amp) ||
-            mvSteps($amp) ||
-            wpzoomSteps($amp) ||
-            wprmSteps($amp) ||
-            easySteps($amp) ||
-            genericSteps($amp);
-        }
+        if(!ingredients.length) ingredients = genericIngredients($amp);
+        if(!steps.length)       steps       = genericSteps($amp);
       }catch{/* ignore */}
     }
 
